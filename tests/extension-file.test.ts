@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseFileFragment } from "../src/platform/extension-file.ts";
+import { withFragmentFile } from "../src/viewer/file-fragment.ts";
 
 function parse(value: string) {
   return parseFileFragment(`#?file=${encodeURIComponent(value)}`);
@@ -13,6 +14,24 @@ test("encodes each segment of absolute local paths and preserves Windows drive l
   assert.equal(parse("d:/PDFs/report.pdf")?.href, "file:///d:/PDFs/report.pdf");
   assert.equal(parse("/home/user/trailing-space.pdf ")?.href, "file:///home/user/trailing-space.pdf%20");
   assert.equal(parse("/folder/..//home/user/a.pdf")?.href, "file:///home/user/a.pdf");
+});
+
+test("picker fragments round-trip native paths with URL delimiters and Japanese characters", () => {
+  const filename = "資料 & #1+%.pdf";
+  for (const [path, pathname] of [
+    [`/home/user/${filename}`, `/home/user/${filename}`],
+    [`C:\\Users\\user\\${filename}`, `/C:/Users/user/${filename}`],
+  ]) {
+    const url = new URL("chrome-extension://extension-id/extension.html#?view=fit&file=old&file=older");
+    url.hash = withFragmentFile(url.hash, path);
+    const params = new URLSearchParams(url.hash.slice(2));
+    assert.deepEqual(params.getAll("file"), [path]);
+    assert.equal(params.get("view"), "fit");
+    assert.equal(decodeURIComponent(parseFileFragment(url.hash)!.pathname), pathname);
+    assert.equal(withFragmentFile(url.hash), "#?view=fit");
+  }
+  assert.equal(withFragmentFile("#?file=old"), "");
+  assert.equal(withFragmentFile("#page=2"), "#page=2");
 });
 
 test("canonicalizes local file URLs and preserves HTTP(S) queries", () => {

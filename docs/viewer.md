@@ -2,7 +2,7 @@
 
 ## How the targets share code
 
-The web and extension entry points both mount the viewer in `src/viewer/`. Web preferences use per-origin local storage. Extension preferences use Chrome’s local extension storage. Chrome’s background service worker opens the viewer in a new tab when the toolbar action fires. The extension requests `storage` and declares the `file:///*` host permission for opening local PDF URLs.
+The web and extension entry points both mount the viewer in `src/viewer/`. Web preferences use per-origin local storage. Extension preferences use Chrome’s local extension storage. Chrome’s background service worker opens the viewer in a new tab when the toolbar action fires. The extension requests `storage` and `debugger`, and declares the `file:///*` host permission for opening local PDF URLs.
 
 Both builds include the PDF.js parser and rendering workers, annotation images, character maps, standard fonts, color profiles, and image decoders. The extension allows local WebAssembly for the decoders. PDF document scripting is disabled. A static host must serve JavaScript modules with a JavaScript MIME type and should serve WebAssembly as `application/wasm`. Both builds use relative asset paths. The web build also works when hosted under a subdirectory.
 
@@ -30,6 +30,12 @@ const viewer = "chrome-extension://<extensionID>/extension.html";
 const file = "/home/user/Notes & plans.pdf";
 const viewerUrl = `${viewer}#?file=${encodeURIComponent(file)}`;
 ```
+
+### Reopen a PDF selected with Open File
+
+In the Chrome extension, **Open File** starts loading the selected PDF immediately. With **Allow access to file URLs** enabled, the viewer adds the encoded absolute path to the current tab’s address bar. Reload the tab to reopen that PDF. Selecting another file replaces the path. Dragging in a file, using **Open URL**, or closing the PDF clears the picker path. If Chrome can’t retrieve the path or file access is disabled, the viewer still opens the selected PDF and shows a notice explaining why the address bar could not be updated.
+
+Chrome lists two warnings for the required `debugger` permission, “Access the page debugger backend” and “Read and change all your data on all websites.” The extension checks the file access setting and attaches only to the viewer tab to read the selected file’s path. Chrome can display the banner `"PDF Reader" started debugging this browser`. The extension disconnects after the lookup. [Chrome’s permission warnings](https://developer.chrome.com/docs/extensions/reference/permissions-list) · [Chromium’s debugger banner text](https://chromium.googlesource.com/chromium/src/+/main/chrome/app/generated_resources.grd)
 
 ## How PDF lightness inversion works
 

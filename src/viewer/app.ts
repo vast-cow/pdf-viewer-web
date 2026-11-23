@@ -1,5 +1,6 @@
 import "pdfjs-dist/legacy/web/pdf_viewer.css";
 import "./styles.css";
+import { withFragmentFile } from "./file-fragment";
 import { layout } from "./layout";
 import { FindState, PdfReader, type ReaderState } from "./pdf-reader";
 import { DocumentSidebar } from "./sidebar";
@@ -26,6 +27,7 @@ type MatchCount = { current: number; total: number };
 
 interface FragmentSource {
   parse(hash: string): URL | null | undefined;
+  getPickedFilePath(file: File): Promise<string>;
   isAllowedFileSchemeAccess(): Promise<boolean>;
 }
 
@@ -65,6 +67,7 @@ export function startViewer(store: PreferenceStore, fragment?: FragmentSource) {
 
   let state: ReaderState = { kind: "idle" };
   let submitPassword: ((password: string) => void) | undefined;
+  let filePathRequest = 0;
 
   const reader = new PdfReader(scrollRegion, element<HTMLDivElement>("pages"), {
     state: updateState,
@@ -127,7 +130,6 @@ export function startViewer(store: PreferenceStore, fragment?: FragmentSource) {
     hideSearch(false);
     query.value = "";
     searchStatus.textContent = "";
-    notice.hidden = true;
     document.title = "PDF Reader";
 
     if (next.kind === "loading") {
@@ -260,6 +262,43 @@ export function startViewer(store: PreferenceStore, fragment?: FragmentSource) {
   });
   element("dismiss-notice").addEventListener("click", () => { notice.hidden = true; });
 
+  function replaceFragment(hash: string) {
+    if (hash === window.location.hash) return;
+    const url = new URL(window.location.href);
+    url.hash = hash;
+    window.history.replaceState(window.history.state, "", url);
+  }
+
+  function clearDocumentFragment() {
+    filePathRequest++;
+    notice.hidden = true;
+    if (fragment) replaceFragment(withFragmentFile(window.location.hash));
+  }
+
+  function openPdf(source: File | URL) {
+    clearDocumentFragment();
+    void reader.open(source);
+  }
+
+  async function updatePickedFileUrl(file: File, source: FragmentSource) {
+    const request = filePathRequest;
+    const startingUrl = window.location.href;
+    const isCurrent = () => request === filePathRequest && startingUrl === window.location.href;
+    try {
+      const path = await source.getPickedFilePath(file);
+      if (!isCurrent()) return;
+      const hash = withFragmentFile(window.location.hash, path);
+      if (source.parse(hash)?.protocol !== "file:") {
+        throw new Error("Chrome returned a path the viewer couldn’t reopen.");
+      }
+      replaceFragment(hash);
+    } catch (error) {
+      if (!isCurrent()) return;
+      const reason = error instanceof Error ? error.message : "Chrome couldn’t retrieve the selected file’s path.";
+      showNotice(`Couldn’t put the file path in the URL. ${reason}`);
+    }
+  }
+
   function openLocalFile() {
     overflow.close(true);
     picker.click();
@@ -268,7 +307,9 @@ export function startViewer(store: PreferenceStore, fragment?: FragmentSource) {
   picker.addEventListener("change", () => {
     const file = picker.files?.[0];
     picker.value = "";
-    if (file) void reader.open(file);
+    if (!file) return;
+    openPdf(file);
+    if (fragment) void updatePickedFileUrl(file, fragment);
   });
 
   button("open-url").addEventListener("click", () => {
@@ -288,7 +329,7 @@ export function startViewer(store: PreferenceStore, fragment?: FragmentSource) {
       return;
     }
     urlDialog.close();
-    void reader.open(url);
+    openPdf(url);
   });
 
   element("password-form").addEventListener("submit", event => {
@@ -308,6 +349,7 @@ export function startViewer(store: PreferenceStore, fragment?: FragmentSource) {
   button("close-file").addEventListener("click", closePdf);
 
   function closePdf() {
+    clearDocumentFragment();
     reader.close();
     button("choose-file").focus();
   }
@@ -386,21 +428,26 @@ export function startViewer(store: PreferenceStore, fragment?: FragmentSource) {
     }
   });
 
-  bindDrop(file => { void reader.open(file); });
+  bindDrop(openPdf);
   window.addEventListener("pagehide", event => {
+    filePathRequest++;
     if (!event.persisted) reader.close();
   });
 
   if (fragment) {
     const openFragment = () => {
+      filePathRequest++;
       const url = fragment.parse(window.location.hash);
+      if (url !== undefined) notice.hidden = true;
       if (url === null) {
         reader.showError("Enter an absolute local path, a file URL, or an HTTP or HTTPS URL without embedded credentials.");
       } else if (url) {
         void reader.open(url);
       }
     };
-    window.addEventListener("hashchange", openFragment);
+    window.addEventListener("hashchange", event => {
+      if (event.newURL === window.location.href) openFragment();
+    });
     openFragment();
   }
 }

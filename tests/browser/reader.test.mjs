@@ -232,13 +232,19 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
   const path = join(directory, "sample.pdf");
   const largePath = join(directory, "large.pdf");
   const invalidPath = join(directory, "invalid.pdf");
-  await Promise.all([writeFile(path, small), writeFile(largePath, large), writeFile(invalidPath, "This is not a PDF.")]);
+  const localName = "資料 & #1+%.pdf";
+  const localPath = join(directory, localName);
+  await Promise.all([
+    writeFile(path, small), writeFile(largePath, large), writeFile(invalidPath, "This is not a PDF."),
+    writeFile(localPath, samplePdf(2)),
+  ]);
   const url = `${server.origin}/reader/`;
 
   await t.test("static build renders, searches and inverts with WebGL2", async () => {
     const { targetId, page } = await newPage(chrome, url);
     await chooseFile(page, path);
     await ready(page, text);
+    assert.equal(await page.evaluate("location.href"), url);
     assert.equal(await page.evaluate('document.querySelector("#page-count").textContent'), "/ 4");
     assert.equal(await page.evaluate('document.querySelector(".page").getBoundingClientRect().bottom <= document.querySelector("#scroll-region").getBoundingClientRect().bottom'), true);
     assert.deepEqual(await sample(page, sourceCanvas, 0.1, 0.08), [51, 102, 153, 255]);
@@ -919,9 +925,6 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
   });
 
   await t.test("extension URL opens local PDFs at startup and switches PDFs in the same tab", async () => {
-    const name = "資料 & #1+%.pdf";
-    const localPath = join(directory, name);
-    await writeFile(localPath, samplePdf(2));
     const fragment = value => `#?file=${encodeURIComponent(value)}`;
     const initialUrl = extensionUrl + fragment(localPath);
 
@@ -943,6 +946,11 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
     assert.equal(await denied.page.evaluate("chrome.extension.isAllowedFileSchemeAccess()"), false);
     await ready(denied.page, "#file-error:not([hidden])");
     assert.match(await denied.page.evaluate('document.querySelector("#error-message").textContent'), /Allow access to file URLs/);
+    await chooseFile(denied.page, localPath);
+    await ready(denied.page, text);
+    await ready(denied.page, "#notice:not([hidden])");
+    assert.match(await denied.page.evaluate('document.querySelector("#notice-message").textContent'), /Allow access to file URLs/);
+    assert.equal(await denied.page.evaluate("location.href"), extensionUrl);
     await chrome.send("Target.closeTarget", { targetId: denied.targetId });
 
     await setFileAccess(true);
@@ -952,7 +960,7 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
     await ready(page, text);
     assert.equal(await page.evaluate("chrome.extension.isAllowedFileSchemeAccess()"), true);
     const filename = () => page.evaluate('document.querySelector("#filename").textContent');
-    assert.equal(await filename(), name);
+    assert.equal(await filename(), localName);
     await page.evaluate("globalThis.sameViewer = true");
 
     const setFragment = hash => page.evaluate(`location.hash = ${JSON.stringify(hash)}`);
@@ -977,6 +985,111 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
 
     await setFragment(fragment("./relative.pdf"));
     await waitFor(() => page.evaluate('document.querySelector("#error-message").textContent.includes("absolute local path")'), "invalid fragment guidance");
+    await chrome.send("Target.closeTarget", { targetId });
+  });
+
+  await t.test("extension picker updates the current URL and ignores superseded file paths", async () => {
+    const { targetId, page } = await newPage(chrome, extensionUrl);
+    const filename = () => page.evaluate('document.querySelector("#filename").textContent');
+    const pickerUrl = path => `${extensionUrl}#?${new URLSearchParams({ file: path })}`;
+    const waitForUrl = expected => waitFor(async () => await page.evaluate("location.href") === expected, expected);
+    const historyLength = await page.evaluate(`(() => {
+      globalThis.fragmentWrites = [];
+      globalThis.hashChanges = 0;
+      addEventListener("hashchange", () => hashChanges++);
+      const replaceState = history.replaceState;
+      history.replaceState = function (...args) {
+        fragmentWrites.push(String(args[2]));
+        return replaceState.apply(this, args);
+      };
+      return history.length;
+    })()`);
+
+    await chooseFile(page, path);
+    await waitForUrl(pickerUrl(path));
+    await ready(page, text);
+    assert.equal(await filename(), "sample.pdf");
+
+    const worker = await waitFor(async () => {
+      const { targetInfos } = await chrome.send("Target.getTargets");
+      return targetInfos.find(info => info.url === `chrome-extension://${id}/background.js`);
+    }, "extension picker service worker");
+    const background = await chrome.attach(worker.targetId);
+    async function pauseNextFilePath() {
+      await background.evaluate(`(() => {
+        const sendCommand = chrome.debugger.sendCommand;
+        chrome.debugger.sendCommand = async function (...args) {
+          const result = await sendCommand.apply(this, args);
+          if (args[1] === "DOM.getFileInfo") {
+            chrome.debugger.sendCommand = sendCommand;
+            await new Promise(resolve => { globalThis.resumeFilePath = resolve; });
+            delete globalThis.resumeFilePath;
+          }
+          return result;
+        };
+      })()`);
+    }
+    const waitForPausedPath = () => waitFor(() => background.evaluate("!!globalThis.resumeFilePath"), "paused Chrome file path lookup");
+    const resumePath = () => background.evaluate("globalThis.resumeFilePath()");
+    const waitForClearedReferences = () => waitFor(() => page.evaluate(
+      '!Object.keys(globalThis).some(key => key.startsWith("pdfReaderPickedFile_"))',
+    ), "cleared picker file references");
+
+    await pauseNextFilePath();
+    await chooseFile(page, path);
+    await waitForPausedPath();
+    await chooseFile(page, localPath);
+    await waitFor(async () => await filename() === localName, "latest PDF displayed before the path lookup completes");
+    assert.equal(await page.evaluate("location.href"), extensionUrl);
+    await resumePath();
+    await waitForUrl(pickerUrl(localPath));
+    await waitForClearedReferences();
+    assert.deepEqual(await page.evaluate("fragmentWrites"), [pickerUrl(path), extensionUrl, pickerUrl(localPath)]);
+    assert.equal(await page.evaluate("hashChanges"), 0);
+    assert.equal(await page.evaluate("history.length"), historyLength);
+
+    await page.command("Page.reload");
+    await ready(page, text);
+    assert.equal(await page.evaluate("typeof globalThis.fragmentWrites"), "undefined");
+    assert.equal(await filename(), localName);
+    assert.equal(await page.evaluate("location.href"), pickerUrl(localPath));
+
+    await pauseNextFilePath();
+    await chooseFile(page, path);
+    await waitForPausedPath();
+    const manualHash = "#?view=fit";
+    await page.evaluate(`location.hash = ${JSON.stringify(manualHash)}`);
+    await resumePath();
+    await waitForClearedReferences();
+    assert.equal(await page.evaluate("location.hash"), manualHash);
+
+    await chooseFile(page, path);
+    const localParams = new URLSearchParams({ view: "fit", file: path });
+    await waitForUrl(`${extensionUrl}#?${localParams}`);
+    await ready(page, text);
+    await menuAction(page, "#close-file");
+    assert.equal(await page.evaluate("location.hash"), manualHash);
+
+    await chooseFile(page, localPath);
+    localParams.set("file", localPath);
+    await waitForUrl(`${extensionUrl}#?${localParams}`);
+    await openUrl(page, `${server.origin}/sample.pdf`);
+    await ready(page, text);
+    assert.equal(await page.evaluate("location.hash"), manualHash);
+
+    await page.evaluate(`(() => {
+      const bytes = Uint8Array.from(atob(${JSON.stringify(small.toString("base64"))}), value => value.charCodeAt(0));
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([bytes], "without-a-path.pdf", { type: "application/pdf" }));
+      const picker = document.querySelector("#file-picker");
+      picker.files = transfer.files;
+      picker.dispatchEvent(new Event("change", { bubbles: true }));
+    })()`);
+    await waitFor(async () => await filename() === "without-a-path.pdf", "PDF displayed despite failed path lookup");
+    await ready(page, "#notice:not([hidden])");
+    assert.match(await page.evaluate('document.querySelector("#notice-message").textContent'), /Couldn’t put the file path in the URL/);
+    assert.equal(await page.evaluate("location.hash"), manualHash);
+    await waitForClearedReferences();
     await chrome.send("Target.closeTarget", { targetId });
   });
 
