@@ -433,7 +433,23 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
     await waitFor(() => currentPage(page, 3), "named outline destination");
     await click(page, "#show-thumbnails");
     await ready(page, `${selectedThumbnail}[data-page="3"] canvas`);
+    await click(page, "#fit-width");
+    await page.evaluate(`(() => {
+      const region = document.querySelector("#scroll-region");
+      const current = document.querySelector('.pdfViewer .page[data-page-number="3"]');
+      const frame = region.getBoundingClientRect();
+      const bounds = current.getBoundingClientRect();
+      region.scrollTop += Math.round(bounds.top - frame.top + bounds.height * 0.25);
+      return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    })()`);
+    await waitFor(() => page.evaluate('document.querySelector(\'.pdfViewer .page[data-page-number="3"]\').getBoundingClientRect().top < 0'), "scrolled inside page three");
+    assert.equal(await currentPage(page, 3), true);
     await click(page, "#fit-page");
+    await waitFor(() => page.evaluate(`(() => {
+      const frame = document.querySelector("#scroll-region").getBoundingClientRect();
+      const page = document.querySelector('.pdfViewer .page[data-page-number="3"]').getBoundingClientRect();
+      return page.top >= frame.top - 1 && page.bottom <= frame.bottom + 1;
+    })()`), "fit page reveals the whole current page", 2000);
     await click(page, "#rotate");
     const rotatedPage = '.pdfViewer .page[data-page-number="3"]';
     await waitFor(() => page.evaluate(`(() => {
@@ -490,19 +506,38 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
     await ready(page, '#sidebar-scrim:not([hidden])');
     await ready(page, '.thumbnail[data-page="1"] canvas');
     assert.equal(await page.evaluate('document.querySelector("#scroll-region").clientWidth'), regionWidth);
+    assert.equal(await page.evaluate(`(() => {
+      const region = document.querySelector("#scroll-region");
+      region.focus();
+      return document.activeElement.id;
+    })()`), "show-thumbnails");
     await page.evaluate(`(() => {
+      globalThis.lastPageResources = new Set();
+      globalThis.cleanedLastPageResources = new Set();
+      const send = Worker.prototype.postMessage;
+      Worker.prototype.postMessage = function (message, ...args) {
+        if (message.action === "GetOperatorList" && message.data.pageIndex === 239) {
+          lastPageResources.add(message.data.pageProxyId);
+        }
+        if (message.action === "CleanupPage" && lastPageResources.has(message.data.pageProxyId)) {
+          cleanedLastPageResources.add(message.data.pageProxyId);
+        }
+        return send.call(this, message, ...args);
+      };
       const list = document.querySelector("#thumbnails");
       list.focus();
       list.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
       return true;
     })()`);
     await ready(page, '.thumbnail[data-page="240"] canvas');
+    await waitFor(() => page.evaluate('cleanedLastPageResources.size > 0'), "release of thumbnail-only page resources", 2000);
     assert.equal(await page.evaluate('document.activeElement.dataset.page'), "240");
     assert.equal(await exists(page, '.thumbnail[data-page="1"]'), false);
     assert.ok(await page.evaluate('document.querySelectorAll("#thumbnail-list canvas").length <= 8'));
     await click(page, '.thumbnail[data-page="240"]');
     await waitFor(() => currentPage(page, 240), "mobile thumbnail navigation");
     assert.equal(await exists(page, "#sidebar:not([hidden]), #sidebar-scrim:not([hidden]), #thumbnail-list canvas"), false);
+    assert.equal(await page.evaluate('document.activeElement.id'), "scroll-region");
 
     await menuAction(page, '[data-action="fit-width"]');
     assert.equal(await exists(page, '[data-action="fit-width"][aria-pressed="true"]'), true);

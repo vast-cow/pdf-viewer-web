@@ -1,4 +1,5 @@
-import type { PDFDocumentProxy, RenderTask } from "pdfjs-dist/legacy/build/pdf.mjs";
+import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist/legacy/build/pdf.mjs";
+import type { EventBus } from "pdfjs-dist/legacy/web/pdf_viewer.mjs";
 
 type OutlineItem = Awaited<ReturnType<PDFDocumentProxy["getOutline"]>>[number];
 type Destination = NonNullable<OutlineItem["dest"]>;
@@ -48,6 +49,7 @@ class ThumbnailList {
     private readonly viewport: HTMLElement,
     private readonly list: HTMLElement,
     navigate: (page: number) => void,
+    private readonly events: EventBus,
   ) {
     list.style.setProperty("--thumbnail-row-height", `${rowHeight}px`);
     viewport.addEventListener("scroll", () => this.schedule());
@@ -208,8 +210,9 @@ class ThumbnailList {
     const job: ThumbnailJob = { thumbnail };
     this.job = job;
     let canvas: HTMLCanvasElement | undefined;
+    let page: PDFPageProxy | undefined;
     try {
-      const page = await pdf.getPage(pageNumber);
+      page = await pdf.getPage(pageNumber);
       if (this.job !== job) return;
       const rotation = (page.rotate + this.rotation) % 360;
       const natural = page.getViewport({ scale: 1, rotation });
@@ -229,6 +232,10 @@ class ThumbnailList {
       // A missing preview still leaves the page number available for navigation.
     } finally {
       if (canvas && thumbnail.canvas !== canvas) canvas.width = canvas.height = 0;
+      if (job.task && this.pdf === pdf) {
+        // PDFViewer cleans the page's rendering data if its own cache doesn't use it.
+        this.events.dispatch("thumbnailrendered", { source: this, pageNumber, pdfPage: page });
+      }
       if (this.job === job) {
         this.job = undefined;
         thumbnail.finished = true;
@@ -246,12 +253,12 @@ export class DocumentSidebar {
   private outlineRequested = false;
   private readonly narrow = matchMedia("(max-width: 720px)");
 
-  constructor(private readonly elements: SidebarElements, private readonly actions: SidebarActions) {
+  constructor(private readonly elements: SidebarElements, private readonly actions: SidebarActions, events: EventBus) {
     const { panel, toggle, scrim, thumbnailTab, outlineTab, thumbnailPanel, thumbnailList } = elements;
     this.thumbnails = new ThumbnailList(thumbnailPanel, thumbnailList, page => {
       this.actions.goToPage(page);
       this.finishNavigation();
-    });
+    }, events);
     toggle.addEventListener("click", event => {
       this.requestedOpen = panel.hidden === true;
       this.updateVisibility();
@@ -303,12 +310,16 @@ export class DocumentSidebar {
   }
 
   private updateVisibility() {
-    const { panel, toggle, scrim } = this.elements;
+    const { panel, toggle, scrim, documentRegion, outlineTab, thumbnailTab } = this.elements;
     const open = Boolean(this.pdf && this.requestedOpen);
     toggle.disabled = !this.pdf;
     toggle.setAttribute("aria-expanded", String(open));
     panel.hidden = !open;
     scrim.hidden = !open || !this.narrow.matches;
+    if (!scrim.hidden && documentRegion.contains(document.activeElement)) {
+      (this.showingOutline ? outlineTab : thumbnailTab).focus({ preventScroll: true });
+    }
+    documentRegion.inert = !scrim.hidden;
     this.thumbnails.show(open && !this.showingOutline);
     if (open && this.showingOutline && !this.outlineRequested && this.pdf) void this.loadOutline(this.pdf);
   }

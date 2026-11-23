@@ -90,7 +90,7 @@ export function startViewer(store: PreferenceStore) {
   }, {
     goToPage: page => { void reader.goToPage(page); },
     goToDestination: destination => { void reader.goToDestination(destination); },
-  });
+  }, reader.events);
 
   function showNotice(message: string) {
     element("notice-message").textContent = message;
@@ -208,12 +208,18 @@ export function startViewer(store: PreferenceStore) {
     else updateMatches(matchesCount);
   });
 
+  function setZoom(value: string) {
+    const page = reader.view.currentPageNumber;
+    reader.view.currentScaleValue = value;
+    if (value === "page-fit" || reader.view.currentPageNumber !== page) {
+      reader.view.currentPageNumber = page;
+    }
+  }
+
   new ResizeObserver(() => {
     if (state.kind !== "ready") return;
-    const page = reader.view.currentPageNumber;
     const preset = reader.view.currentScaleValue;
-    if (preset === "page-fit" || preset === "page-width") reader.view.currentScaleValue = preset;
-    if (reader.view.currentPageNumber !== page) reader.view.currentPageNumber = page;
+    if (preset === "page-fit" || preset === "page-width") setZoom(preset);
     reader.view.update();
   }).observe(scrollRegion);
 
@@ -329,11 +335,11 @@ export function startViewer(store: PreferenceStore) {
   });
   previousPage.addEventListener("click", () => { void reader.goToPage(reader.view.currentPageNumber - 1); });
   nextPage.addEventListener("click", () => { void reader.goToPage(reader.view.currentPageNumber + 1); });
-  zoom.addEventListener("change", () => { reader.view.currentScaleValue = zoom.value; });
+  zoom.addEventListener("change", () => setZoom(zoom.value));
   button("zoom-in").addEventListener("click", () => reader.view.increaseScale());
   button("zoom-out").addEventListener("click", () => reader.view.decreaseScale());
-  button("fit-page").addEventListener("click", () => { reader.view.currentScaleValue = "page-fit"; });
-  button("fit-width").addEventListener("click", () => { reader.view.currentScaleValue = "page-width"; });
+  button("fit-page").addEventListener("click", () => setZoom("page-fit"));
+  button("fit-width").addEventListener("click", () => setZoom("page-width"));
   button("rotate").addEventListener("click", () => {
     const page = reader.view.currentPageNumber;
     reader.view.pagesRotation += 90;

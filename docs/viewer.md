@@ -32,7 +32,7 @@ The Canvas implementation uses `255 - high - low` for 8-bit channels. Applying i
 
 PDF.js schedules visible pages first, limits the page bitmap dimensions, and cancels obsolete renders as the zoom or document changes. High-DPI rendering uses the device pixel ratio within the bitmap budget. At high zoom the viewer also renders a detail canvas for the visible area. Local files are read in slices when needed, and URL loading can use HTTP range requests.
 
-The sidebar renders thumbnails one at a time around its visible area. It releases preview canvases when they scroll out of range, when the sidebar closes, and when the document changes.
+The sidebar renders thumbnails one at a time around its visible area. It releases preview canvases when they scroll out of range, when the sidebar closes, and when the document changes. PDF.js releases thumbnail rendering data for pages outside its main viewer cache.
 
 Inversion uses one reusable WebGL2 context and one pass per canvas. If WebGL2 is unavailable or a canvas exceeds GPU limits, it uses a Canvas 2D pixel pass. Only visible pages get an extra bitmap. Toggling inversion reuses rendered PDF pixels, and removing a document releases its canvases, worker resources, and fetch requests. Search can read text across the PDF, including unrendered pages. PDF.js may switch to page-at-a-time scrolling for exceptionally long documents.
 
