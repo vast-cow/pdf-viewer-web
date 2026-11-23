@@ -24,7 +24,7 @@ interface DocumentSession {
 export type ReaderState =
   | { kind: "idle" }
   | { kind: "loading"; name: string; progress?: number }
-  | { kind: "ready"; name: string; pages: number }
+  | { kind: "ready"; name: string; pdf: PDFDocumentProxy }
   | { kind: "error"; message: string };
 
 interface ReaderCallbacks {
@@ -103,6 +103,7 @@ export class PdfReader {
   readonly colors: PageColors;
   private readonly links: PDFLinkService;
   private active: DocumentSession | undefined;
+  private destinationRequest?: object;
   private disposing = Promise.resolve();
 
   constructor(container: HTMLDivElement, pages: HTMLDivElement, private readonly callbacks: ReaderCallbacks) {
@@ -127,7 +128,7 @@ export class PdfReader {
     this.events.on("pagesinit", () => {
       const session = this.active;
       if (!session?.pdf) return;
-      this.callbacks.state({ kind: "ready", name: session.name, pages: session.pdf.numPages });
+      this.callbacks.state({ kind: "ready", name: session.name, pdf: session.pdf });
       this.view.currentScaleValue = "page-fit";
     });
     this.events.on("pagerendered", ({ error, pageNumber }: { error?: Error; pageNumber: number }) => {
@@ -185,6 +186,7 @@ export class PdfReader {
   }
 
   async goToPage(pageNumber: number) {
+    this.destinationRequest = undefined;
     const session = this.active;
     if (!session?.pdf || pageNumber < 1 || pageNumber > session.pdf.numPages) return;
     this.view.currentPageNumber = pageNumber;
@@ -204,6 +206,33 @@ export class PdfReader {
       if (this.active === session && this.view.currentPageNumber === pageNumber) {
         this.callbacks.notice(`Page ${pageNumber} couldn’t be opened.`);
       }
+    }
+  }
+
+  async goToDestination(destination: string | unknown[]) {
+    const pdf = this.active?.pdf;
+    if (!pdf) return;
+    const request = this.destinationRequest = {};
+    const isCurrent = () => this.active?.pdf === pdf && this.destinationRequest === request;
+    try {
+      const explicit = typeof destination === "string" ? await pdf.getDestination(destination) : destination;
+      if (!isCurrent()) return;
+      if (!explicit?.length) throw new Error("Invalid destination.");
+      const [reference] = explicit;
+      const pageNumber = typeof reference === "number" ? reference + 1 : (await pdf.getPageIndex(reference)) + 1;
+      if (!isCurrent()) return;
+      if (!Number.isInteger(pageNumber) || pageNumber < 1 || pageNumber > pdf.numPages) {
+        throw new Error("Invalid destination page.");
+      }
+      // Fit and coordinate destinations need the target page's actual dimensions.
+      const page = await pdf.getPage(pageNumber);
+      if (!isCurrent()) return;
+      const pageView = this.view.getPageView(pageNumber - 1) as PDFPageView;
+      if (!pageView.pdfPage) pageView.setPdfPage(page);
+      this.view.currentPageNumber = pageNumber;
+      this.view.scrollPageIntoView({ pageNumber, destArray: explicit });
+    } catch {
+      if (isCurrent()) this.callbacks.notice("Couldn’t open this bookmark.");
     }
   }
 
@@ -235,6 +264,7 @@ export class PdfReader {
 
   private detach() {
     this.callbacks.dismissPassword();
+    this.destinationRequest = undefined;
     const previous = this.active;
     this.active = undefined;
     if (!previous) return;

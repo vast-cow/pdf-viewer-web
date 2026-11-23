@@ -8,11 +8,12 @@ Both builds include the PDF.js parser and rendering workers, annotation images, 
 
 ## Reading PDFs
 
-- Open a file with the picker, drag it onto the viewer, or enter an absolute HTTP(S) URL.
-- Use the page field or arrow buttons to jump between pages. Choose **Fit width**, **Fit page**, or adjust the zoom with the plus and minus buttons.
+- Open a file with the picker, drag it onto the viewer, or choose **Open URL** in **More actions** and enter an absolute HTTP(S) URL.
+- Use the page field or choose **Previous page** or **Next page** in **More actions**. The toolbar provides **Fit width**, **Fit page**, zoom, and clockwise rotation. On narrow screens, the menu also holds fit, rotation, find, and download actions.
+- Open the sidebar to browse page thumbnails or follow bookmarks in the document outline. In the thumbnail list, use the arrow keys to move between previews and Enter to open the focused page.
 - Use **Find** or Ctrl/Command+F to search. Enter moves to the next match and Shift+Enter moves to the previous one. Text selection, links, and supported annotations stay available in either PDF color mode.
 - **Download** retrieves the original PDF bytes. The viewer also supports password entry and retries for encrypted PDFs supported by PDF.js.
-- **Theme** controls the interface. **Invert PDF** controls the pixel colors on rendered pages. Both preferences persist.
+- **Theme** in **More actions** controls the interface. **Invert PDF** in the toolbar controls the pixel colors on rendered pages. Both preferences persist independently.
 
 URL loading follows the browser’s access rules, including CORS and mixed-content restrictions. Cross-origin URLs generally need a suitable `Access-Control-Allow-Origin` header. For incremental loading, the server must also support and expose the relevant byte-range headers. Scans without a text layer need OCR before their text can be selected or searched. XFA forms and PDF scripts are outside the viewer’s supported features.
 
@@ -30,6 +31,8 @@ The Canvas implementation uses `255 - high - low` for 8-bit channels. Applying i
 ## Rendering and memory
 
 PDF.js schedules visible pages first, limits the page bitmap dimensions, and cancels obsolete renders as the zoom or document changes. High-DPI rendering uses the device pixel ratio within the bitmap budget. At high zoom the viewer also renders a detail canvas for the visible area. Local files are read in slices when needed, and URL loading can use HTTP range requests.
+
+The sidebar renders thumbnails one at a time around its visible area. It releases preview canvases when they scroll out of range, when the sidebar closes, and when the document changes.
 
 Inversion uses one reusable WebGL2 context and one pass per canvas. If WebGL2 is unavailable or a canvas exceeds GPU limits, it uses a Canvas 2D pixel pass. Only visible pages get an extra bitmap. Toggling inversion reuses rendered PDF pixels, and removing a document releases its canvases, worker resources, and fetch requests. Search can read text across the PDF, including unrendered pages. PDF.js may switch to page-at-a-time scrolling for exceptionally long documents.
 

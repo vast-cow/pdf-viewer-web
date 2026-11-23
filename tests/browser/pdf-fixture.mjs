@@ -1,12 +1,19 @@
 // A small, deterministic PDF with extractable text, colored pixels and two links.
-export function samplePdf(count = 4, padding = 0, secondPageSize = [360, 480]) {
+export function samplePdf(count = 4, padding = 0, secondPageSize = [360, 480], withOutline = false) {
   const firstPage = 4;
   const firstStream = firstPage + count;
   const internalLink = firstStream + count;
   const externalLink = internalLink + 1;
+  const outlines = externalLink + 1;
+  const chapter = outlines + 1;
+  const section = chapter + 1;
+  const destination = firstPage + Math.min(2, count - 1);
+  const outlineCatalog = withOutline
+    ? `/Outlines ${outlines} 0 R /Dests << /Section [${destination} 0 R /Fit] >>`
+    : "";
   const kids = Array.from({ length: count }, (_, index) => `${firstPage + index} 0 R`);
   const objects = [
-    "<< /Type /Catalog /Pages 2 0 R >>",
+    `<< /Type /Catalog /Pages 2 0 R ${outlineCatalog} >>`,
     `<< /Type /Pages /Kids [${kids.join(" ")}] /Count ${count} >>`,
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
   ];
@@ -26,9 +33,15 @@ export function samplePdf(count = 4, padding = 0, secondPageSize = [360, 480]) {
     ].join("\n");
     objects.push(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);
   }
-  const destination = firstPage + Math.min(2, count - 1);
   objects.push(`<< /Type /Annot /Subtype /Link /Rect [20 322 150 344] /Border [0 0 0] /Dest [${destination} 0 R /Fit] >>`);
   objects.push("<< /Type /Annot /Subtype /Link /Rect [20 285 150 310] /Border [0 0 0] /A << /S /URI /URI (https://example.com/) >> >>");
+  if (withOutline) {
+    objects.push(
+      `<< /Type /Outlines /First ${chapter} 0 R /Last ${chapter} 0 R /Count 2 >>`,
+      `<< /Title (Chapter) /Parent ${outlines} 0 R /First ${section} 0 R /Last ${section} 0 R /Count 1 /Dest [${firstPage} 0 R /Fit] >>`,
+      `<< /Title (Section) /Parent ${chapter} 0 R /Dest (Section) >>`,
+    );
+  }
 
   let pdf = "%PDF-1.7\n";
   const offsets = objects.map((object, index) => {

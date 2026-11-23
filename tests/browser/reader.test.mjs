@@ -73,10 +73,17 @@ async function serve() {
 const sourceCanvas = '.page[data-page-number="1"] .canvasWrapper > canvas[role="presentation"]';
 const invertedCanvas = '.page[data-page-number="1"] .pdf-inverted-canvas';
 const text = '.page[data-page-number="1"] .textLayer span[dir]';
+const selectedThumbnail = '.thumbnail[aria-current="page"]';
 const headerColor = `getComputedStyle(document.querySelector(".reader-header")).backgroundColor`;
 
 function click(page, selector) {
   return page.evaluate(`document.querySelector(${JSON.stringify(selector)}).click(); true`);
+}
+
+async function menuAction(page, selector) {
+  await click(page, "#overflow-toggle");
+  assert.equal(await page.evaluate(`document.querySelector(${JSON.stringify(selector)}).getClientRects().length > 0`), true);
+  await click(page, selector);
 }
 
 function setValue(page, selector, value, event = "input") {
@@ -88,8 +95,19 @@ function setValue(page, selector, value, event = "input") {
   })()`);
 }
 
+async function selectTheme(page, theme) {
+  await click(page, "#overflow-toggle");
+  await ready(page, "#overflow-panel:not([hidden]) #theme");
+  await setValue(page, "#theme", theme, "change");
+  await click(page, "#overflow-toggle");
+}
+
 function exists(page, selector) {
   return page.evaluate(`!!document.querySelector(${JSON.stringify(selector)})`);
+}
+
+function currentPage(page, number) {
+  return page.evaluate(`document.querySelector("#page-number").value === "${number}"`);
 }
 
 async function ready(page, selector) {
@@ -114,7 +132,7 @@ async function chooseFile(page, path) {
 }
 
 async function openUrl(page, url) {
-  await click(page, "#open-url");
+  await menuAction(page, "#open-url");
   await setValue(page, "#pdf-url", url);
   await page.evaluate('document.querySelector("#url-form").requestSubmit(); true');
 }
@@ -184,9 +202,9 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
 
     await page.command("Emulation.setEmulatedMedia", { features: [{ name: "prefers-color-scheme", value: "dark" }] });
     const systemDark = await page.evaluate(headerColor);
-    await setValue(page, "#theme", "light", "change");
+    await selectTheme(page, "light");
     const light = await page.evaluate(headerColor);
-    await setValue(page, "#theme", "dark", "change");
+    await selectTheme(page, "dark");
     const dark = await page.evaluate(headerColor);
     assert.notEqual(light, dark);
     assert.equal(systemDark, dark);
@@ -225,7 +243,7 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
     assert.equal(external, "https://example.com/");
     await click(page, '.annotationLayer a[href^="#"]');
     await waitFor(() => page.evaluate('document.querySelector("#page-number").value === "3"'), "internal PDF link");
-    await click(page, "#previous-page");
+    await menuAction(page, "#previous-page");
     await waitFor(() => page.evaluate('document.querySelector("#page-number").value === "2"'), "previous page");
 
     await click(page, "#show-search");
@@ -274,7 +292,7 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
     })`);
     assert.ok(counts.pageCanvases <= 10, JSON.stringify(counts));
     assert.ok(counts.inverted <= 4, JSON.stringify(counts));
-    await click(page, "#close-file");
+    await menuAction(page, "#close-file");
     assert.equal(await exists(page, "#pages canvas"), false);
     await chooseFile(page, invalidPath);
     await waitFor(() => page.evaluate('document.querySelector("#error-message").textContent.includes("invalid")'), "invalid PDF error");
@@ -291,7 +309,7 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
     await waitFor(() => page.evaluate('document.querySelector("#filename").textContent === "large.pdf"'), "remote ranged PDF");
     await ready(page, invertedCanvas);
     await chrome.send("Browser.setDownloadBehavior", { behavior: "allow", downloadPath: join(directory, "downloads") });
-    await click(page, "#download");
+    await menuAction(page, '[data-action="download"]');
     const bytes = await waitFor(() => readFile(join(directory, "downloads", "large.pdf")).catch(() => null), "original remote PDF download");
     assert.deepEqual(bytes, large);
     await chrome.send("Target.closeTarget", { targetId });
@@ -324,7 +342,7 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
     await writeFile(mixedPath, samplePdf(2, 0, [980, 750]));
     await chooseFile(page, mixedPath);
     await ready(page, text);
-    await click(page, "#next-page");
+    await menuAction(page, "#next-page");
     const secondCanvas = '.page[data-page-number="2"] .canvasWrapper > canvas[role="presentation"]';
     await ready(page, secondCanvas);
     const fits = (widthOnly = false) => page.evaluate(`(() => {
@@ -336,11 +354,184 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
         ? page.width >= region.clientWidth - 50
         : page.top >= frame.top - 1 && page.bottom <= frame.bottom + 1);
     })()`);
-    await waitFor(() => fits(), "fit page at the actual page size", 2000);
-    await click(page, "#previous-page");
+    try {
+      await waitFor(() => fits(), "fit page at the actual page size", 2000);
+    } catch (error) {
+      const detail = await page.evaluate(`(() => {
+        const region = document.querySelector("#scroll-region");
+        const canvas = document.querySelector('${secondCanvas}');
+        return {
+          frame: region.getBoundingClientRect().toJSON(),
+          page: canvas.getBoundingClientRect().toJSON(),
+          scrollTop: region.scrollTop,
+          scrollHeight: region.scrollHeight,
+          selected: document.querySelector("#page-number").value,
+          scale: document.querySelector("#zoom-percentage").textContent,
+          preset: document.querySelector("#zoom").value,
+        };
+      })()`);
+      throw new Error(`${error.message}: ${JSON.stringify(detail)}`, { cause: error });
+    }
+    await menuAction(page, "#previous-page");
     await setValue(page, "#zoom", "page-width", "change");
     await setValue(page, "#page-number", "2", "change");
     await waitFor(() => fits(true), "fit width at the actual page size", 2000);
+    await chrome.send("Target.closeTarget", { targetId });
+  });
+
+  await t.test("sidebar thumbnails, bookmarks, rotation and desktop fit controls", async () => {
+    const { targetId, page } = await newPage(chrome, url);
+    await page.command("Emulation.setDeviceMetricsOverride", { width: 1100, height: 760, deviceScaleFactor: 1, mobile: false });
+    const outlined = join(directory, "outlined.pdf");
+    await writeFile(outlined, samplePdf(4, 0, [360, 480], true));
+    await chooseFile(page, outlined);
+    await ready(page, text);
+    if (!await exists(page, '#invert[aria-pressed="true"]')) await click(page, "#invert");
+    assert.equal(await exists(page, "#sidebar:not([hidden])"), false);
+    assert.equal(await exists(page, "#thumbnail-list canvas"), false);
+
+    await click(page, "#fit-width");
+    assert.equal(await exists(page, '#fit-width[aria-pressed="true"]'), true);
+    const regionWidth = () => page.evaluate('document.querySelector("#scroll-region").clientWidth');
+    const zoom = () => page.evaluate('parseInt(document.querySelector("#zoom-percentage").textContent, 10)');
+    const fullWidth = await regionWidth();
+    const fullZoom = await zoom();
+    await page.evaluate('globalThis.firstPageView = document.querySelector(".pdfViewer .page"); true');
+    await click(page, "#toggle-sidebar");
+    await ready(page, '.thumbnail[data-page="1"] canvas');
+    assert.equal(await exists(page, '#toggle-sidebar[aria-expanded="true"]'), true);
+    assert.equal(await page.evaluate('document.activeElement.id'), "show-thumbnails");
+    assert.ok(await regionWidth() < fullWidth);
+    await waitFor(async () => await zoom() < fullZoom, "fit width recalculated for the open sidebar");
+    assert.equal(await page.evaluate('firstPageView === document.querySelector(".pdfViewer .page")'), true);
+    assert.equal(await exists(page, `${selectedThumbnail}[data-page="1"]`), true);
+
+    await click(page, '.thumbnail[data-page="2"]');
+    await waitFor(() => currentPage(page, 2), "thumbnail navigation");
+    await ready(page, `${selectedThumbnail}[data-page="2"]`);
+    await page.evaluate(`(() => {
+      const region = document.querySelector("#scroll-region");
+      const page = document.querySelector('.pdfViewer [data-page-number="4"]');
+      region.scrollTop += page.getBoundingClientRect().top - region.getBoundingClientRect().top;
+      return true;
+    })()`);
+    await ready(page, `${selectedThumbnail}[data-page="4"]`);
+    assert.equal(await currentPage(page, 4), true);
+    await click(page, "#toggle-sidebar");
+    await waitFor(async () => await zoom() === fullZoom, "fit width recalculated for the closed sidebar");
+    assert.equal(await currentPage(page, 4), true);
+    assert.equal(await regionWidth(), fullWidth);
+    assert.equal(await exists(page, "#thumbnail-list canvas"), false);
+
+    await click(page, "#toggle-sidebar");
+    await click(page, "#show-outline");
+    await ready(page, "#outline li li button");
+    assert.equal(await page.evaluate('document.querySelector("#outline li li button").textContent'), "Section");
+    await click(page, "#outline > ul > li > button");
+    await waitFor(() => currentPage(page, 1), "explicit outline destination");
+    await click(page, "#outline li li button");
+    await waitFor(() => currentPage(page, 3), "named outline destination");
+    await click(page, "#show-thumbnails");
+    await ready(page, `${selectedThumbnail}[data-page="3"] canvas`);
+    await click(page, "#fit-page");
+    await click(page, "#rotate");
+    const rotatedPage = '.pdfViewer .page[data-page-number="3"]';
+    await waitFor(() => page.evaluate(`(() => {
+      const { width, height } = document.querySelector('${rotatedPage}').getBoundingClientRect();
+      const region = document.querySelector("#scroll-region");
+      const thumbnail = document.querySelector('${selectedThumbnail} canvas');
+      return width > height && width <= region.clientWidth && height <= region.clientHeight
+        && thumbnail && thumbnail.width > thumbnail.height;
+    })()`), "rotated page and thumbnail with fit page");
+    assert.equal(await currentPage(page, 3), true);
+    const rotatedInversion = `${rotatedPage} .pdf-inverted-canvas`;
+    await ready(page, rotatedInversion);
+    assert.deepEqual(await sample(page, rotatedInversion, 0.5, 0.5), [0, 0, 0, 255]);
+    await click(page, "#zoom-in");
+    await ready(page, rotatedInversion);
+    assert.deepEqual(await sample(page, rotatedInversion, 0.5, 0.5), [0, 0, 0, 255]);
+    const manualZoom = await zoom();
+    await click(page, "#toggle-sidebar");
+    assert.equal(await zoom(), manualZoom);
+    assert.equal(await currentPage(page, 3), true);
+
+    await click(page, "#toggle-sidebar");
+    await chooseFile(page, path);
+    await ready(page, '.thumbnail[aria-current="page"][data-page="1"] canvas');
+    assert.equal(await exists(page, '.thumbnail[aria-current="page"][data-page="3"]'), false);
+    assert.equal(await page.evaluate(`(() => {
+      const {width, height} = document.querySelector(".pdfViewer .page").getBoundingClientRect();
+      return height > width;
+    })()`), true);
+    await ready(page, invertedCanvas);
+    assert.deepEqual(await sample(page, invertedCanvas, 0.1, 0.08), [102, 153, 204, 255]);
+    await click(page, "#show-outline");
+    await waitFor(() => page.evaluate('document.querySelector("#outline").textContent.includes("no document outline")'), "empty outline after replacement");
+    await menuAction(page, "#close-file");
+    assert.equal(await exists(page, "#sidebar:not([hidden]), #outline li, #pages canvas, #thumbnail-list canvas"), false);
+    await chrome.send("Target.closeTarget", { targetId });
+  });
+
+  await t.test("narrow toolbar, keyboard access and bounded thumbnail rendering", async () => {
+    const { targetId, page } = await newPage(chrome, url);
+    await page.command("Emulation.setDeviceMetricsOverride", { width: 320, height: 660, deviceScaleFactor: 2, mobile: true });
+    await chooseFile(page, largePath);
+    await ready(page, text);
+    assert.equal(await page.evaluate(`(() => {
+      const toolbar = document.querySelector(".reader-header");
+      const end = document.querySelector(".toolbar-end");
+      const controls = document.querySelector("#document-toolbar");
+      return toolbar.offsetHeight === 56 && document.documentElement.scrollWidth === innerWidth
+        && controls.getBoundingClientRect().right <= end.getBoundingClientRect().left
+        && document.querySelector("#invert").getClientRects().length === 1;
+    })()`), true);
+    const regionWidth = await page.evaluate('document.querySelector("#scroll-region").clientWidth');
+    await click(page, "#toggle-sidebar");
+    await ready(page, '#sidebar-scrim:not([hidden])');
+    await ready(page, '.thumbnail[data-page="1"] canvas');
+    assert.equal(await page.evaluate('document.querySelector("#scroll-region").clientWidth'), regionWidth);
+    await page.evaluate(`(() => {
+      const list = document.querySelector("#thumbnails");
+      list.focus();
+      list.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true }));
+      return true;
+    })()`);
+    await ready(page, '.thumbnail[data-page="240"] canvas');
+    assert.equal(await page.evaluate('document.activeElement.dataset.page'), "240");
+    assert.equal(await exists(page, '.thumbnail[data-page="1"]'), false);
+    assert.ok(await page.evaluate('document.querySelectorAll("#thumbnail-list canvas").length <= 8'));
+    await click(page, '.thumbnail[data-page="240"]');
+    await waitFor(() => currentPage(page, 240), "mobile thumbnail navigation");
+    assert.equal(await exists(page, "#sidebar:not([hidden]), #sidebar-scrim:not([hidden]), #thumbnail-list canvas"), false);
+
+    await menuAction(page, '[data-action="fit-width"]');
+    assert.equal(await exists(page, '[data-action="fit-width"][aria-pressed="true"]'), true);
+    await menuAction(page, '[data-action="rotate"]');
+    await waitFor(() => page.evaluate(`(() => {
+      const {width, height} = document.querySelector('.pdfViewer [data-page-number="240"]').getBoundingClientRect();
+      return width > height;
+    })()`), "rotation from the narrow menu");
+    await menuAction(page, '[data-action="show-search"]');
+    assert.equal(await page.evaluate('document.activeElement.id'), "search-query");
+    await click(page, "#close-search");
+    assert.equal(await page.evaluate('document.activeElement.id'), "overflow-toggle");
+
+    await click(page, "#overflow-toggle");
+    assert.equal(await page.evaluate('document.activeElement.id'), "open-file");
+    await page.command("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape" });
+    assert.equal(await exists(page, "#overflow-panel:not([hidden])"), false);
+    assert.equal(await page.evaluate('document.activeElement.id'), "overflow-toggle");
+    await page.evaluate('document.dispatchEvent(new KeyboardEvent("keydown", { key: "f", ctrlKey: true, cancelable: true })); true');
+    assert.equal(await page.evaluate('document.activeElement.id'), "search-query");
+    await page.evaluate(`(() => {
+      const picker = document.querySelector("#file-picker");
+      const click = picker.click;
+      const calls = [];
+      picker.click = () => calls.push(true);
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "o", metaKey: true, cancelable: true }));
+      picker.click = click;
+      return calls.length;
+    })()`).then(count => assert.equal(count, 1));
     await chrome.send("Target.closeTarget", { targetId });
   });
 
@@ -394,10 +585,15 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
     for (const file of ["pdf.worker.min", "pdf.renderer.min"]) {
       assert.ok(workers.some(url => url.startsWith(`chrome-extension://${id}/`) && url.includes(file)), JSON.stringify(workers));
     }
-    await setValue(page, "#theme", "dark", "change");
+    await selectTheme(page, "dark");
     await click(page, "#invert");
     await ready(page, invertedCanvas);
     assert.deepEqual(await sample(page, invertedCanvas, 0.1, 0.08), [102, 153, 204, 255]);
+    await click(page, "#toggle-sidebar");
+    await ready(page, '.thumbnail[data-page="1"] canvas');
+    await click(page, '.thumbnail[data-page="2"]');
+    await ready(page, `${selectedThumbnail}[data-page="2"]`);
+    await click(page, "#toggle-sidebar");
     await openUrl(page, `${server.origin}/without-cors.pdf`);
     await waitFor(() => page.evaluate('!document.querySelector("#file-error").hidden'), "cross-origin refusal");
     await openUrl(page, `${server.origin}/sample.pdf`);

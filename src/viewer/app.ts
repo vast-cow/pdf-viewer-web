@@ -2,6 +2,8 @@ import "pdfjs-dist/legacy/web/pdf_viewer.css";
 import "./styles.css";
 import { layout } from "./layout";
 import { FindState, PdfReader, type ReaderState } from "./pdf-reader";
+import { DocumentSidebar } from "./sidebar";
+import { OverflowPanel } from "./toolbar";
 import {
   readPreferences, themeOptions, type Preferences, type PreferenceStore,
 } from "./preferences";
@@ -32,11 +34,20 @@ export function startViewer(store: PreferenceStore) {
   const previousPage = button("previous-page");
   const nextPage = button("next-page");
   const zoom = element<HTMLSelectElement>("zoom");
+  const zoomPercentage = element("zoom-percentage");
   const theme = element<HTMLSelectElement>("theme");
   const invert = button("invert");
   const picker = input("file-picker");
   const searchPanel = element("search-panel");
   const searchToggle = button("show-search");
+  const download = button("download");
+  const overflow = new OverflowPanel(button("overflow-toggle"), element("overflow-panel"));
+  const compactActions = new Map<string, HTMLButtonElement>();
+  for (const action of document.querySelectorAll<HTMLButtonElement>("[data-action]")) {
+    const target = action.dataset.action!;
+    compactActions.set(target, action);
+    action.addEventListener("click", () => button(target).click());
+  }
   const query = input("search-query");
   const searchStatus = element("search-status");
   const urlDialog = element<HTMLDialogElement>("url-dialog");
@@ -66,6 +77,20 @@ export function startViewer(store: PreferenceStore) {
     },
     notice: showNotice,
   });
+  const sidebar = new DocumentSidebar({
+    panel: element("sidebar"),
+    toggle: button("toggle-sidebar"),
+    scrim: element("sidebar-scrim"),
+    thumbnailTab: button("show-thumbnails"),
+    outlineTab: button("show-outline"),
+    thumbnailPanel: element("thumbnails"),
+    thumbnailList: element("thumbnail-list"),
+    outline: element("outline"),
+    documentRegion: scrollRegion,
+  }, {
+    goToPage: page => { void reader.goToPage(page); },
+    goToDestination: destination => { void reader.goToDestination(destination); },
+  });
 
   function showNotice(message: string) {
     element("notice-message").textContent = message;
@@ -74,21 +99,25 @@ export function startViewer(store: PreferenceStore) {
 
   function updateState(next: ReaderState) {
     state = next;
-    toolbar.hidden = next.kind !== "ready";
-    scrollRegion.tabIndex = next.kind === "ready" ? 0 : -1;
+    const ready = next.kind === "ready";
+    toolbar.hidden = searchToggle.hidden = download.hidden = element("overflow-document-actions").hidden = !ready;
+    scrollRegion.tabIndex = ready ? 0 : -1;
     element("welcome").hidden = next.kind !== "idle";
     element("load-panel").hidden = next.kind !== "loading";
     element("file-error").hidden = next.kind !== "error";
+    const filename = element("filename");
+    filename.textContent = filename.title = ready ? next.name : "PDF Reader";
+    sidebar.setDocument(ready ? next.pdf : undefined);
 
     if (next.kind === "ready") {
-      const filename = element("filename");
-      filename.textContent = filename.title = next.name;
       document.title = `${next.name} · PDF Reader`;
       updatePage(reader.view.currentPageNumber);
       scrollRegion.focus({ preventScroll: true });
       return;
     }
 
+    setDownloadBusy(false);
+    if (next.kind !== "loading") sidebar.close();
     hideSearch(false);
     query.value = "";
     searchStatus.textContent = "";
@@ -108,9 +137,11 @@ export function startViewer(store: PreferenceStore) {
   function updatePage(pageNumber: number) {
     if (state.kind !== "ready") return;
     pageInput.value = String(pageNumber);
-    pageCount.textContent = `/ ${state.pages}`;
+    pageCount.textContent = `/ ${state.pdf.numPages}`;
+    pageInput.style.width = `${Math.max(2, String(state.pdf.numPages).length)}ch`;
     previousPage.disabled = pageNumber <= 1;
-    nextPage.disabled = pageNumber >= state.pages;
+    nextPage.disabled = pageNumber >= state.pdf.numPages;
+    sidebar.select(pageNumber);
   }
 
   function find(type = "", findPrevious = false) {
@@ -133,6 +164,7 @@ export function startViewer(store: PreferenceStore) {
     if (state.kind !== "ready") return;
     searchPanel.hidden = false;
     searchToggle.setAttribute("aria-expanded", "true");
+    compactActions.get("show-search")?.setAttribute("aria-expanded", "true");
     query.focus();
     query.select();
     if (query.value) find();
@@ -142,8 +174,9 @@ export function startViewer(store: PreferenceStore) {
     if (searchPanel.hidden) return;
     searchPanel.hidden = true;
     searchToggle.setAttribute("aria-expanded", "false");
+    compactActions.get("show-search")?.setAttribute("aria-expanded", "false");
     reader.events.dispatch("findbarclose", { source: query });
-    if (restoreFocus) searchToggle.focus();
+    if (restoreFocus) (searchToggle.offsetParent ? searchToggle : overflow.toggle).focus();
   }
 
   function updateMatches(matches: MatchCount) {
@@ -153,11 +186,19 @@ export function startViewer(store: PreferenceStore) {
   }
 
   reader.events.on("pagechanging", ({ pageNumber }: { pageNumber: number }) => updatePage(pageNumber));
+  reader.events.on("rotationchanging", ({ pagesRotation }: { pagesRotation: number }) => sidebar.rotate(pagesRotation));
   reader.events.on("scalechanging", ({ scale, presetValue }: { scale: number; presetValue?: string }) => {
-    const current = zoom.options[0];
-    current.textContent = `${Math.round(scale * 100)}%`;
+    const percentage = `${Math.round(scale * 100)}%`;
+    zoomPercentage.textContent = zoom.options[0].textContent = percentage;
     zoom.value = presetValue === "page-fit" || presetValue === "page-width" ? presetValue : "";
-    zoom.title = `Zoom: ${current.textContent}`;
+    zoom.title = `Zoom: ${percentage}`;
+    zoom.setAttribute("aria-label", `Zoom level, ${percentage}`);
+    for (const fit of ["fit-page", "fit-width"]) {
+      const preset = fit === "fit-page" ? "page-fit" : "page-width";
+      const pressed = String(presetValue === preset);
+      button(fit).setAttribute("aria-pressed", pressed);
+      compactActions.get(fit)?.setAttribute("aria-pressed", pressed);
+    }
   });
   reader.events.on("updatefindmatchescount", ({ matchesCount }: { matchesCount: MatchCount }) => updateMatches(matchesCount));
   reader.events.on("updatefindcontrolstate", ({ state: result, matchesCount }: { state: number; matchesCount: MatchCount }) => {
@@ -169,8 +210,10 @@ export function startViewer(store: PreferenceStore) {
 
   new ResizeObserver(() => {
     if (state.kind !== "ready") return;
+    const page = reader.view.currentPageNumber;
     const preset = reader.view.currentScaleValue;
     if (preset === "page-fit" || preset === "page-width") reader.view.currentScaleValue = preset;
+    if (reader.view.currentPageNumber !== page) reader.view.currentPageNumber = page;
     reader.view.update();
   }).observe(scrollRegion);
 
@@ -205,9 +248,11 @@ export function startViewer(store: PreferenceStore) {
   });
   element("dismiss-notice").addEventListener("click", () => { notice.hidden = true; });
 
-  for (const id of ["open-file", "choose-file", "retry-file"]) {
-    button(id).addEventListener("click", () => picker.click());
+  function openLocalFile() {
+    overflow.close(true);
+    picker.click();
   }
+  for (const id of ["open-file", "choose-file", "retry-file"]) button(id).addEventListener("click", openLocalFile);
   picker.addEventListener("change", () => {
     const file = picker.files?.[0];
     picker.value = "";
@@ -215,6 +260,7 @@ export function startViewer(store: PreferenceStore) {
   });
 
   button("open-url").addEventListener("click", () => {
+    overflow.close(true);
     urlError.hidden = true;
     urlDialog.showModal();
     urlInput.select();
@@ -254,13 +300,19 @@ export function startViewer(store: PreferenceStore) {
     button("choose-file").focus();
   }
 
-  button("download").addEventListener("click", async () => {
-    const download = button("download");
-    download.disabled = true;
+  function setDownloadBusy(busy: boolean) {
+    download.disabled = busy;
+    const compactDownload = compactActions.get("download");
+    if (compactDownload) compactDownload.disabled = busy;
+  }
+
+  download.addEventListener("click", async () => {
+    const started = state;
+    setDownloadBusy(true);
     try {
       await reader.downloadOriginal();
     } finally {
-      download.disabled = false;
+      if (state === started) setDownloadBusy(false);
     }
   });
 
@@ -271,7 +323,7 @@ export function startViewer(store: PreferenceStore) {
   pageInput.addEventListener("change", () => {
     const page = Number(pageInput.value);
     if (Number.isInteger(page) && state.kind === "ready") {
-      void reader.goToPage(Math.max(1, Math.min(state.pages, page)));
+      void reader.goToPage(Math.max(1, Math.min(state.pdf.numPages, page)));
     }
     updatePage(reader.view.currentPageNumber);
   });
@@ -280,6 +332,13 @@ export function startViewer(store: PreferenceStore) {
   zoom.addEventListener("change", () => { reader.view.currentScaleValue = zoom.value; });
   button("zoom-in").addEventListener("click", () => reader.view.increaseScale());
   button("zoom-out").addEventListener("click", () => reader.view.decreaseScale());
+  button("fit-page").addEventListener("click", () => { reader.view.currentScaleValue = "page-fit"; });
+  button("fit-width").addEventListener("click", () => { reader.view.currentScaleValue = "page-width"; });
+  button("rotate").addEventListener("click", () => {
+    const page = reader.view.currentPageNumber;
+    reader.view.pagesRotation += 90;
+    void reader.goToPage(page);
+  });
 
   searchToggle.addEventListener("click", () => searchPanel.hidden ? showSearch() : hideSearch());
   button("close-search").addEventListener("click", () => hideSearch());
@@ -295,16 +354,19 @@ export function startViewer(store: PreferenceStore) {
     find("again");
   });
   button("previous-match").addEventListener("click", () => find("again", true));
+  button("next-match").addEventListener("click", () => find("again"));
 
   document.addEventListener("keydown", event => {
     if (event.defaultPrevented || passwordDialog.open || urlDialog.open) return;
     if (event.key === "Escape" && !searchPanel.hidden) {
       hideSearch();
+    } else if (event.key === "Escape" && sidebar.close(true)) {
+      event.preventDefault();
     } else if ((event.ctrlKey || event.metaKey) && !event.altKey) {
       const key = event.key.toLowerCase();
       if (key === "o") {
         event.preventDefault();
-        picker.click();
+        openLocalFile();
       } else if (key === "f" && state.kind === "ready") {
         event.preventDefault();
         showSearch();
