@@ -9,6 +9,7 @@ import {
 } from "pdfjs-dist/legacy/web/pdf_viewer.mjs";
 import { annotationImages, pdfAssets } from "./pdf-assets";
 import { PageColors } from "./page-colors";
+import { bindPinchZoom } from "./pinch-zoom";
 
 export { FindState } from "pdfjs-dist/legacy/web/pdf_viewer.mjs";
 
@@ -19,6 +20,7 @@ interface DocumentSession {
   name: string;
   task?: PDFDocumentLoadingTask;
   pdf?: PDFDocumentProxy;
+  pinchZoom?: AbortController;
 }
 
 export type ReaderState =
@@ -130,6 +132,8 @@ export class PdfReader {
       if (!session?.pdf) return;
       this.callbacks.state({ kind: "ready", name: session.name, pdf: session.pdf });
       this.view.currentScaleValue = "page-fit";
+      session.pinchZoom = new AbortController();
+      bindPinchZoom(this.view, session.pinchZoom.signal);
     });
     this.events.on("pagerendered", ({ error, pageNumber }: { error?: Error; pageNumber: number }) => {
       if (error) this.callbacks.notice(`Page ${pageNumber} couldn’t be rendered.`);
@@ -268,6 +272,7 @@ export class PdfReader {
     const previous = this.active;
     this.active = undefined;
     if (!previous) return;
+    previous.pinchZoom?.abort();
     if (previous.pdf) {
       const cached = this.view.getCachedPageViews() as Set<PDFPageView>;
       this.view.setDocument(null);

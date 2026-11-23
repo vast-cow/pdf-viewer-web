@@ -110,6 +110,49 @@ function currentPage(page, number) {
   return page.evaluate(`document.querySelector("#page-number").value === "${number}"`);
 }
 
+function zoomState(page, anchor) {
+  return page.evaluate(`(() => {
+    const region = document.querySelector("#scroll-region");
+    const bounds = region.getBoundingClientRect();
+    const { x, y } = ${JSON.stringify(anchor ?? null)} ?? {
+      x: Math.round(bounds.left + bounds.width * 0.4),
+      y: Math.round(bounds.top + bounds.height * 0.6),
+    };
+    const { left, top, width, height } = document.querySelector("#pages .page").getBoundingClientRect();
+    return {
+      x, y, width, height, pageX: (x - left) / width, pageY: (y - top) / height,
+      percent: parseInt(document.querySelector("#zoom-percentage").textContent, 10),
+      viewportScale: visualViewport.scale,
+    };
+  })()`);
+}
+
+function assertZoom(before, after, direction) {
+  for (const property of ["width", "height", "percent"]) {
+    assert.ok(direction * (after[property] - before[property]) > 0,
+      `${property} should ${direction > 0 ? "increase" : "decrease"}: ${before[property]} → ${after[property]}`);
+  }
+  assert.ok(Math.abs(after.width - 480 * after.percent / 100) <= 2, "toolbar matches the PDF scale");
+  assert.equal(after.viewportScale, before.viewportScale);
+}
+
+function pinch(page, { x, y }, scaleFactor, gestureSourceType) {
+  return page.command("Input.synthesizePinchGesture", { x, y, scaleFactor, gestureSourceType });
+}
+
+function touchPair(page, { x, y }, radius, type) {
+  const touchPoints = type === "touchEnd" ? [] : [{ x: x - radius, y, id: 1 }, { x: x + radius, y, id: 2 }];
+  return page.command("Input.dispatchTouchEvent", { type, touchPoints });
+}
+
+function safariGesture(page, selector, type, scale, { x, y }) {
+  return page.evaluate(`(() => {
+    const event = new MouseEvent(${JSON.stringify(type)}, { bubbles: true, cancelable: true, clientX: ${x}, clientY: ${y} });
+    Object.defineProperty(event, "scale", { value: ${scale} });
+    return document.querySelector(${JSON.stringify(selector)}).dispatchEvent(event);
+  })()`);
+}
+
 async function ready(page, selector) {
   try {
     await waitFor(() => exists(page, selector), selector);
@@ -570,6 +613,168 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
     await chrome.send("Target.closeTarget", { targetId });
   });
 
+  await t.test("touchscreen and trackpad pinch zoom the PDF and preserve scrolling and tapping", async () => {
+    const { targetId, page } = await newPage(chrome, url);
+    await page.command("Emulation.setDeviceMetricsOverride", { width: 900, height: 650, deviceScaleFactor: 2, mobile: true });
+    await page.command("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 2 });
+    await chooseFile(page, path);
+    await ready(page, text);
+
+    const link = await waitFor(() => page.evaluate(`new Promise(resolve => requestAnimationFrame(() => {
+      const link = document.querySelector('.annotationLayer a[href^="#"]');
+      if (!link) return resolve(null);
+      const { left, top, width, height } = link.getBoundingClientRect();
+      const x = Math.round(left + width / 2);
+      const y = Math.round(top + height / 2);
+      resolve(document.elementFromPoint(x, y) === link ? { x, y } : null);
+    }))`), "visible PDF link", 2000);
+    await page.command("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ ...link, id: 1 }] });
+    await page.command("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+    await waitFor(() => currentPage(page, 3), "single tap on an internal PDF link", 2000);
+    await setValue(page, "#page-number", "1", "change");
+    await waitFor(() => currentPage(page, 1), "page one for pinch gestures");
+    await click(page, "#toggle-sidebar");
+    await setValue(page, "#zoom", "page-width", "change");
+
+    const initial = await zoomState(page);
+    await touchPair(page, initial, 30, "touchStart");
+    for (const radius of [56, 74, 96]) await touchPair(page, initial, radius, "touchMove");
+    await touchPair(page, initial, 0, "touchEnd");
+    const touchIn = await zoomState(page);
+    assertZoom(initial, touchIn, 1);
+    const shiftedMidpoint = { x: touchIn.x - 28, y: touchIn.y - 24 };
+    await touchPair(page, touchIn, 96, "touchStart");
+    await touchPair(page, touchIn, 70, "touchMove");
+    await touchPair(page, shiftedMidpoint, 61, "touchMove");
+    await touchPair(page, shiftedMidpoint, 0, "touchEnd");
+    const touchOut = await zoomState(page);
+    assertZoom(touchIn, touchOut, -1);
+    const shifted = await zoomState(page, shiftedMidpoint);
+    assert.ok(Math.abs(shifted.pageX - touchIn.pageX) < 0.015, "PDF point follows the moving midpoint horizontally");
+    assert.ok(Math.abs(shifted.pageY - touchIn.pageY) < 0.015, "PDF point follows the moving midpoint vertically");
+
+    await pinch(page, touchOut, 1.35, "mouse");
+    const trackpadIn = await zoomState(page);
+    assertZoom(touchOut, trackpadIn, 1);
+    assert.ok(Math.abs(trackpadIn.pageX - touchOut.pageX) < 0.02, "anchor x with the sidebar open");
+    assert.ok(Math.abs(trackpadIn.pageY - touchOut.pageY) < 0.02, "anchor y below the toolbar");
+    await pinch(page, trackpadIn, 0.85, "mouse");
+    const trackpadOut = await zoomState(page);
+    assertZoom(trackpadIn, trackpadOut, -1);
+
+    const scrollPosition = () => page.evaluate(`(() => {
+      const region = document.querySelector("#scroll-region");
+      return { left: region.scrollLeft, top: region.scrollTop };
+    })()`);
+    assert.ok(await page.evaluate(`(() => {
+      const region = document.querySelector("#scroll-region");
+      region.scrollTo(0, 0);
+      return region.scrollWidth > region.clientWidth;
+    })()`), "zoomed PDF has room to scroll horizontally");
+    const beforeScroll = await scrollPosition();
+    const { x, y } = trackpadOut;
+    for (const [coordinate, axis] of [["x", "left"], ["y", "top"]]) {
+      const point = { x, y, id: 1 };
+      await page.command("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+      for (const offset of [20, 50, 100]) {
+        await page.command("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ ...point, [coordinate]: point[coordinate] - offset }] });
+      }
+      await page.command("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+      await waitFor(async () => (await scrollPosition())[axis] > beforeScroll[axis], `single-finger ${axis} scrolling`, 2000);
+    }
+    const beforeWheel = await scrollPosition();
+    await page.command("Input.dispatchMouseEvent", { type: "mouseWheel", x, y, deltaX: 0, deltaY: 60 });
+    await waitFor(async () => (await scrollPosition()).top > beforeWheel.top, "ordinary wheel scrolling");
+    assert.equal((await zoomState(page)).percent, trackpadOut.percent);
+
+    const unhandledWheel = selector => page.evaluate(`document.querySelector(${JSON.stringify(selector)}).dispatchEvent(
+      new WheelEvent("wheel", { bubbles: true, cancelable: true, ctrlKey: true, deltaY: -150 }))`);
+    assert.equal(await unhandledWheel(".reader-header"), true);
+    assert.equal(await unhandledWheel("#sidebar"), true);
+    assert.equal((await zoomState(page)).percent, trackpadOut.percent);
+
+    await menuAction(page, "#close-file");
+    assert.equal(await unhandledWheel("#scroll-region"), true);
+    assert.equal(await page.evaluate('getComputedStyle(document.querySelector("#scroll-region")).touchAction'), "auto");
+    await chooseFile(page, path);
+    await ready(page, text);
+    const reopened = await zoomState(page);
+    assert.equal(await page.evaluate('getComputedStyle(document.querySelector("#scroll-region")).touchAction'), "pan-x pan-y");
+    await page.command("Input.dispatchMouseEvent", { type: "mouseWheel", x: reopened.x, y: reopened.y, deltaX: 0, deltaY: -150, modifiers: 2 });
+    const ctrlWheel = await waitFor(async () => {
+      const state = await zoomState(page);
+      if (state.percent > reopened.percent) return state;
+    }, "Ctrl+wheel zoom after reopening");
+    assertZoom(reopened, ctrlWheel, 1);
+    assert.ok(Math.abs(ctrlWheel.percent - reopened.percent * 1.1) <= 1, "one wheel event capped at about 10%");
+
+    await chrome.send("Target.closeTarget", { targetId });
+  });
+
+  await t.test("Safari cumulative gesture events zoom once when they overlap touch input", async () => {
+    const { targetId, page } = await newPage(chrome, url);
+    await page.command("Emulation.setTouchEmulationEnabled", { enabled: true, maxTouchPoints: 2 });
+    await chooseFile(page, path);
+    await ready(page, text);
+    const initial = await zoomState(page);
+    const gesture = (type, scale) => safariGesture(page, "#scroll-region", type, scale, initial);
+    const change = async scale => {
+      assert.equal(await gesture("gesturechange", scale), false, "browser gesture canceled inside the PDF");
+      return zoomState(page);
+    };
+
+    await page.evaluate(`globalThis.beforeGestureCanvas = document.querySelector(${JSON.stringify(sourceCanvas)})`);
+    assert.equal(await gesture("gesturestart", 1), false);
+    const larger = await change(1.08);
+    assertZoom(initial, larger, 1);
+    assert.ok(Math.abs(larger.percent - initial.percent * 1.08) <= 1);
+    assert.equal(await page.evaluate(`document.querySelector(${JSON.stringify(sourceCanvas)}) === beforeGestureCanvas`), true);
+    await waitFor(() => page.evaluate(`(() => {
+      const canvas = document.querySelector(${JSON.stringify(sourceCanvas)});
+      return canvas && canvas !== beforeGestureCanvas;
+    })()`), "new canvas after pinch redraw", 2000);
+    const smaller = await change(1.03);
+    assertZoom(larger, smaller, -1);
+    assert.ok(Math.abs(smaller.percent - initial.percent * 1.03) <= 1);
+    assert.deepEqual(await change(1.03), smaller);
+    await gesture("gestureend", 1.03);
+
+    // On iOS, gesturestart may precede the second touchstart.
+    await gesture("gesturestart", 1);
+    await touchPair(page, smaller, 30, "touchStart");
+    assert.deepEqual(await change(1.05), smaller);
+    await touchPair(page, smaller, 55, "touchMove");
+    await touchPair(page, smaller, 69, "touchMove");
+    const touchOnly = await zoomState(page);
+    assertZoom(smaller, touchOnly, 1);
+    assert.deepEqual(await change(1.12), touchOnly);
+    await touchPair(page, smaller, 0, "touchEnd");
+    assert.deepEqual(await change(1.2), touchOnly);
+    await gesture("gestureend", 1.2);
+    await gesture("gesturestart", 1);
+    assertZoom(touchOnly, await change(0.95), -1);
+    await gesture("gestureend", 0.95);
+
+    const wheel = await page.evaluate(`(() => {
+      const region = document.querySelector("#scroll-region");
+      const zoom = document.querySelector("#zoom-percentage");
+      const percent = () => parseInt(zoom.textContent, 10);
+      const smallWheel = () => region.dispatchEvent(new WheelEvent("wheel", {
+        bubbles: true, cancelable: true, ctrlKey: true, deltaY: -0.2, clientX: ${initial.x}, clientY: ${initial.y},
+      }));
+      const before = percent();
+      smallWheel();
+      const first = percent();
+      for (let index = 0; index < 8; index++) smallWheel();
+      return { before, first, after: percent() };
+    })()`);
+    assert.equal(wheel.first, wheel.before, "one small wheel delta rounds away");
+    assert.ok(wheel.after > wheel.before, "small wheel deltas accumulate into a visible change");
+    assert.equal(await safariGesture(page, ".reader-header", "gesturestart", 1, { x: 400, y: 30 }), true);
+    assert.equal(await safariGesture(page, ".reader-header", "gesturechange", 1.1, { x: 400, y: 30 }), true);
+    await chrome.send("Target.closeTarget", { targetId });
+  });
+
   await t.test("replacing a PDF aborts its outstanding download", async () => {
     const { targetId, page } = await newPage(chrome, url);
     await openUrl(page, `${server.origin}/slow-download.pdf`);
@@ -620,6 +825,10 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
     for (const file of ["pdf.worker.min", "pdf.renderer.min"]) {
       assert.ok(workers.some(url => url.startsWith(`chrome-extension://${id}/`) && url.includes(file)), JSON.stringify(workers));
     }
+    const beforePinch = await zoomState(page);
+    await pinch(page, beforePinch, 1.25, "mouse");
+    assertZoom(beforePinch, await zoomState(page), 1);
+    await setValue(page, "#zoom", "page-fit", "change");
     await selectTheme(page, "dark");
     await click(page, "#invert");
     await ready(page, invertedCanvas);
