@@ -1,0 +1,137 @@
+name: Release Chrome Extension
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/release-chrome-extension.yml'
+      - '.npmrc'
+      - 'LICENSE'
+      - 'extension.html'
+      - 'extension/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'public/**'
+      - 'src/platform/chrome.ts'
+      - 'src/platform/extension*.ts'
+      - 'src/viewer/**'
+      - 'tsconfig.json'
+      - 'vite.extension.config.ts'
+      - 'vite.shared.ts'
+  workflow_dispatch:
+
+concurrency:
+  group: release-chrome-extension
+  queue: max
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout the release commit and fetch all tags
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Determine the next version
+        id: version
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+
+          tags = subprocess.check_output(["git", "tag", "--list"], text=True, errors="replace")
+          versions = []
+          for tag in tags.split("\n"):
+              match = re.fullmatch(r"v([0-9]+)\.([0-9]+)\.([0-9]+)", tag)
+              if match:
+                  versions.append(tuple(map(int, match.groups())))
+
+          major, minor, patch = max(versions, default=(0, 0, 0))
+          version = (major, minor, patch + 1)
+          tag = "v" + ".".join(map(str, version))
+          if max(version) > 65535:
+              raise SystemExit(f"{tag} exceeds Chrome's version component limit of 65535")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"tag={tag}", file=output)
+          PY
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the extension
+        run: npm run build:extension
+
+      - name: Package and validate the extension
+        id: package
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+          from zipfile import ZIP_DEFLATED, ZipFile
+
+          tag = os.environ["TAG"]
+          version = tag.removeprefix("v")
+          extension = Path("dist/extension")
+          manifest_path = extension / "manifest.json"
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          manifest["version"] = version
+          manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          shutil.copyfile("LICENSE", extension / "LICENSE")
+
+          archive = Path("dist") / f"pdf-reader-chrome-{tag}.zip"
+          files = sorted(path for path in extension.rglob("*") if path.is_file())
+          with ZipFile(archive, "w", compression=ZIP_DEFLATED) as package:
+              for path in files:
+                  package.write(path, path.relative_to(extension))
+
+          with ZipFile(archive) as package:
+              damaged = package.testzip()
+              if damaged is not None:
+                  raise SystemExit(f"ZIP integrity check failed for {damaged}")
+              if json.loads(package.read("manifest.json"))["version"] != version:
+                  raise SystemExit("The packaged manifest version does not match the release tag")
+              required = {
+                  "LICENSE", "extension.html", "pdfjs/LICENSE",
+                  manifest["background"]["service_worker"],
+                  *manifest["icons"].values(),
+                  *manifest["action"]["default_icon"].values(),
+              }
+              missing = required.difference(package.namelist())
+              if missing:
+                  raise SystemExit(f"Missing extension files: {', '.join(sorted(missing))}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"archive={archive}", file=output)
+          PY
+
+      - name: Create the tag and publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+        shell: bash
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            --raw-field "ref=refs/tags/$TAG" \
+            --raw-field "sha=$GITHUB_SHA" \
+            --silent
+          gh release create "$TAG" "$ARCHIVE" --repo "$GITHUB_REPOSITORY" \
+            --verify-tag --title "$TAG" --generate-notes
