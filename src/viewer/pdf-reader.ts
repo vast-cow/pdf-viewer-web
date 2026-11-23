@@ -184,6 +184,29 @@ export class PdfReader {
     this.callbacks.state({ kind: "idle" });
   }
 
+  async goToPage(pageNumber: number) {
+    const session = this.active;
+    if (!session?.pdf || pageNumber < 1 || pageNumber > session.pdf.numPages) return;
+    this.view.currentPageNumber = pageNumber;
+    const preset = this.view.currentScaleValue;
+    if (preset !== "page-fit" && preset !== "page-width") return;
+
+    try {
+      const page = await session.pdf.getPage(pageNumber);
+      if (this.active !== session || this.view.currentPageNumber !== pageNumber
+          || this.view.currentScaleValue !== preset) return;
+
+      const pageView = this.view.getPageView(pageNumber - 1) as PDFPageView;
+      if (!pageView.pdfPage) pageView.setPdfPage(page);
+      this.view.currentScaleValue = preset;
+      this.view.currentPageNumber = pageNumber;
+    } catch {
+      if (this.active === session && this.view.currentPageNumber === pageNumber) {
+        this.callbacks.notice(`Page ${pageNumber} couldn’t be opened.`);
+      }
+    }
+  }
+
   async downloadOriginal() {
     const session = this.active;
     if (!session?.pdf) return;

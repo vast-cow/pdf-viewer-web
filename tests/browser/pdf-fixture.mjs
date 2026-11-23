@@ -1,5 +1,5 @@
 // A small, deterministic PDF with extractable text, colored pixels and two links.
-export function samplePdf(count = 4, padding = 0) {
+export function samplePdf(count = 4, padding = 0, secondPageSize = [360, 480]) {
   const firstPage = 4;
   const firstStream = firstPage + count;
   const internalLink = firstStream + count;
@@ -13,7 +13,8 @@ export function samplePdf(count = 4, padding = 0) {
 
   for (let index = 0; index < count; index++) {
     const annotations = index === 0 ? `/Annots [${internalLink} 0 R ${externalLink} 0 R]` : "";
-    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 360 480]
+    const [width, height] = index === 1 ? secondPageSize : [360, 480];
+    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${width} ${height}]
       /Resources << /Font << /F1 3 0 R >> >> /Contents ${firstStream + index} 0 R ${annotations} >>`);
   }
   for (let index = 0; index < count; index++) {

@@ -271,12 +271,12 @@ export function startViewer(store: PreferenceStore) {
   pageInput.addEventListener("change", () => {
     const page = Number(pageInput.value);
     if (Number.isInteger(page) && state.kind === "ready") {
-      reader.view.currentPageNumber = Math.max(1, Math.min(state.pages, page));
+      void reader.goToPage(Math.max(1, Math.min(state.pages, page)));
     }
     updatePage(reader.view.currentPageNumber);
   });
-  previousPage.addEventListener("click", () => reader.view.previousPage());
-  nextPage.addEventListener("click", () => reader.view.nextPage());
+  previousPage.addEventListener("click", () => { void reader.goToPage(reader.view.currentPageNumber - 1); });
+  nextPage.addEventListener("click", () => { void reader.goToPage(reader.view.currentPageNumber + 1); });
   zoom.addEventListener("change", () => { reader.view.currentScaleValue = zoom.value; });
   button("zoom-in").addEventListener("click", () => reader.view.increaseScale());
   button("zoom-out").addEventListener("click", () => reader.view.decreaseScale());

@@ -17,10 +17,11 @@ const mime = {
 };
 
 async function serve() {
+  let blockedRanges = 0;
   const server = createServer(async (req, res) => {
     const { pathname } = new URL(req.url, "http://localhost");
-    if (pathname === "/sample.pdf" || pathname === "/large.pdf" || pathname === "/without-cors.pdf") {
-      const bytes = pathname === "/large.pdf" ? large : small;
+    if (["/sample.pdf", "/large.pdf", "/slow-download.pdf", "/without-cors.pdf"].includes(pathname)) {
+      const bytes = ["/large.pdf", "/slow-download.pdf"].includes(pathname) ? large : small;
       if (pathname !== "/without-cors.pdf") {
         res.setHeader("Access-Control-Allow-Origin", "*");
         res.setHeader("Access-Control-Allow-Headers", "Range");
@@ -36,6 +37,11 @@ async function serve() {
       if (range) {
         const start = Number(range[1]);
         const end = Math.min(Number(range[2]), bytes.length - 1);
+        if (pathname === "/slow-download.pdf" && start >= 131_072 && end < bytes.length - 1) {
+          blockedRanges++;
+          res.once("close", () => { blockedRanges--; });
+          return;
+        }
         const body = bytes.subarray(start, end + 1);
         res.writeHead(206, { "Content-Range": `bytes ${start}-${end}/${bytes.length}`, "Content-Length": body.length }).end(body);
       } else {
@@ -59,6 +65,7 @@ async function serve() {
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   return {
     origin: `http://127.0.0.1:${server.address().port}`,
+    get blockedRanges() { return blockedRanges; },
     close: () => new Promise(resolve => server.close(resolve)),
   };
 }
@@ -311,6 +318,46 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
     await chrome.send("Target.closeTarget", { targetId });
   });
 
+  await t.test("fit presets account for lazily loaded page dimensions", async () => {
+    const { targetId, page } = await newPage(chrome, url);
+    const mixedPath = join(directory, "mixed-pages.pdf");
+    await writeFile(mixedPath, samplePdf(2, 0, [980, 750]));
+    await chooseFile(page, mixedPath);
+    await ready(page, text);
+    await click(page, "#next-page");
+    const secondCanvas = '.page[data-page-number="2"] .canvasWrapper > canvas[role="presentation"]';
+    await ready(page, secondCanvas);
+    const fits = (widthOnly = false) => page.evaluate(`(() => {
+      const canvas = document.querySelector(${JSON.stringify(secondCanvas)});
+      const region = document.querySelector("#scroll-region");
+      const frame = region.getBoundingClientRect();
+      const page = canvas?.getBoundingClientRect();
+      return page && page.width <= region.clientWidth && (${widthOnly}
+        ? page.width >= region.clientWidth - 50
+        : page.top >= frame.top - 1 && page.bottom <= frame.bottom + 1);
+    })()`);
+    await waitFor(() => fits(), "fit page at the actual page size", 2000);
+    await click(page, "#previous-page");
+    await setValue(page, "#zoom", "page-width", "change");
+    await setValue(page, "#page-number", "2", "change");
+    await waitFor(() => fits(true), "fit width at the actual page size", 2000);
+    await chrome.send("Target.closeTarget", { targetId });
+  });
+
+  await t.test("replacing a PDF aborts its outstanding download", async () => {
+    const { targetId, page } = await newPage(chrome, url);
+    await openUrl(page, `${server.origin}/slow-download.pdf`);
+    await ready(page, "#document-toolbar:not([hidden])");
+    await click(page, "#download");
+    assert.equal(await exists(page, "#download:disabled"), true);
+    await waitFor(() => server.blockedRanges > 0, "pending PDF download");
+    await chooseFile(page, path);
+    await waitFor(() => page.evaluate('document.querySelector("#filename").textContent === "sample.pdf"'), "replacement PDF");
+    await ready(page, "#download:enabled");
+    await waitFor(() => server.blockedRanges === 0, "closed HTTP range request");
+    await chrome.send("Target.closeTarget", { targetId });
+  });
+
   await t.test("unpacked MV3 toolbar action, local PDF, URL and persisted preferences", async () => {
     const { id } = await chrome.send("Extensions.loadUnpacked", { path: extension });
     const extensionUrl = `chrome-extension://${id}/extension.html`;
@@ -332,8 +379,21 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
     }, "extension viewer tab");
     const page = await chrome.attach(target.targetId);
     await ready(page, "#file-picker");
+    await page.evaluate(`(() => {
+      globalThis.localWorkers = [];
+      globalThis.Worker = class extends Worker {
+        constructor(url, options) {
+          super(url, options);
+          this.addEventListener("message", () => localWorkers.push(String(url)), { once: true });
+        }
+      };
+    })()`);
     await chooseFile(page, path);
     await ready(page, text);
+    const workers = await page.evaluate("localWorkers");
+    for (const file of ["pdf.worker.min", "pdf.renderer.min"]) {
+      assert.ok(workers.some(url => url.startsWith(`chrome-extension://${id}/`) && url.includes(file)), JSON.stringify(workers));
+    }
     await setValue(page, "#theme", "dark", "change");
     await click(page, "#invert");
     await ready(page, invertedCanvas);
