@@ -19,4 +19,6 @@ npm run check
 - `npm run build:extension` builds `dist/extension/`. In `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select that directory. Click the extension’s toolbar icon to open the reader.
 - `npm run build` builds both targets. After building, run `npm run test:browser` with an installed Chrome.
 
+For GitHub Pages, select **GitHub Actions** as the source under **Settings → Pages**. The **Deploy GitHub Pages** workflow builds and publishes `dist/web/` when web build inputs change on `main`. You can also run it manually from the **Actions** tab.
+
 See [architecture, color inversion, and browser testing](docs/viewer.md) for details.
