@@ -12,17 +12,44 @@ type SafariGesture = Event & { scale: number; clientX: number; clientY: number }
 export function bindPinchZoom(view: PDFViewer, signal: AbortSignal) {
   const { container } = view;
   container.classList.add("pinch-zoom");
-  signal.addEventListener("abort", () => container.classList.remove("pinch-zoom"), { once: true });
+  signal.addEventListener("abort", () => {
+    clearDeferredRedraw();
+    container.classList.remove("pinch-zoom");
+  }, { once: true });
 
   let lastInput: ZoomInput | undefined;
   let lastScale = view.currentScale;
   let remainder = 1;
+  let nativeRedrawAt = 0;
+  let redrawTimer: number | undefined;
   let touchPinching = false;
   let gestureScale: number | undefined;
   let gestureUsesTouch = false;
 
+  function clearDeferredRedraw() {
+    window.clearTimeout(redrawTimer);
+    redrawTimer = undefined;
+    nativeRedrawAt = 0;
+  }
+
+  function deferPendingRedraw() {
+    if (view.currentScale !== lastScale) return;
+    if (redrawTimer === undefined) {
+      if (performance.now() >= nativeRedrawAt) return;
+      // Clear PDF.js's pending timer while keeping the pages in CSS zoom mode.
+      view.refresh(true, { drawingDelay });
+      nativeRedrawAt = 0;
+    }
+    window.clearTimeout(redrawTimer);
+    redrawTimer = window.setTimeout(() => {
+      redrawTimer = undefined;
+      if (view.currentScale === lastScale) view.refresh();
+    }, drawingDelay);
+  }
+
   function zoomBy(input: ZoomInput, factor: number, x: number, y: number, pan?: [number, number]) {
     const scale = view.currentScale;
+    if (lastScale !== scale) clearDeferredRedraw();
     if (input !== lastInput || lastScale !== scale) remainder = 1;
     lastInput = input;
 
@@ -30,9 +57,14 @@ export function bindPinchZoom(view: PDFViewer, signal: AbortSignal) {
     const rounded = Math.round(target * 100) / 100;
     if (rounded === Math.round(scale * 100) / 100) {
       if (pan) view.panBy(...pan);
+      deferPendingRedraw();
     } else {
+      clearDeferredRedraw();
       const { left, top } = container.getBoundingClientRect();
       const [offsetTop, offsetLeft] = view.containerTopLeft;
+      const centeredPage = view.isHorizontalScrollbarEnabled ? null :
+        document.elementFromPoint(x, y)?.closest(".pdfViewer .page");
+      const before = centeredPage?.getBoundingClientRect();
       // PDF.js subtracts offsets relative to the workspace. Supply coordinates in that frame.
       view.updateScale({
         scaleFactor: rounded / scale,
@@ -40,6 +72,13 @@ export function bindPinchZoom(view: PDFViewer, signal: AbortSignal) {
         pan,
         drawingDelay,
       });
+      nativeRedrawAt = performance.now() + drawingDelay;
+      if (centeredPage && before?.width && view.isHorizontalScrollbarEnabled) {
+        // PDF.js clamps the negative page offset when a centered page grows beyond the viewport.
+        const after = centeredPage.getBoundingClientRect();
+        const anchoredX = after.left + (x - before.left) * after.width / before.width;
+        view.panBy(x + (pan?.[0] ?? 0) - anchoredX, 0);
+      }
     }
     lastScale = view.currentScale;
     remainder = target / lastScale;
@@ -57,6 +96,7 @@ export function bindPinchZoom(view: PDFViewer, signal: AbortSignal) {
     },
     onPanning(dx: number, dy: number) {
       view.panBy(dx, dy);
+      deferPendingRedraw();
     },
     onPinchEnd() {
       touchPinching = false;

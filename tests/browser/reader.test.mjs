@@ -775,6 +775,76 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
     await chrome.send("Target.closeTarget", { targetId });
   });
 
+  await t.test("zoom preserves the cursor crossing into overflow and redraws after the last input", async () => {
+    const { targetId, page } = await newPage(chrome, url);
+    await page.command("Emulation.setDeviceMetricsOverride", { width: 760, height: 900, deviceScaleFactor: 1, mobile: false });
+    await chooseFile(page, path);
+    await ready(page, text);
+    await setValue(page, "#zoom", "page-width", "change");
+    await waitFor(() => page.evaluate(`(() => {
+      const canvas = document.querySelector(${JSON.stringify(sourceCanvas)});
+      return canvas && Math.abs(canvas.width - canvas.offsetWidth) <= 1;
+    })()`), "page-width canvas");
+
+    const result = await page.evaluate(`(async () => {
+      const region = document.querySelector("#scroll-region");
+      const pdfPage = document.querySelector("#pages .page");
+      const canvas = () => document.querySelector(${JSON.stringify(sourceCanvas)});
+      const before = region.getBoundingClientRect();
+      const x = before.left + region.clientWidth / 2;
+      const y = before.top + region.clientHeight / 2;
+      const wheel = deltaY => region.dispatchEvent(new WheelEvent("wheel", {
+        bubbles: true, cancelable: true, ctrlKey: true, deltaY, clientX: x, clientY: y,
+      }));
+      const anchor = rect => (x - rect.left) / rect.width;
+      const originalCanvas = canvas();
+      const initial = pdfPage.getBoundingClientRect();
+      const wasCentered = region.scrollWidth === region.clientWidth;
+      wheel(-150);
+      const enlarged = pdfPage.getBoundingClientRect();
+      const overflowed = region.scrollWidth > region.clientWidth;
+      const immediate = canvas() === originalCanvas;
+      await new Promise(resolve => setTimeout(resolve, 120));
+      const lastInput = performance.now();
+      wheel(-0.01);
+      const unchanged = pdfPage.getBoundingClientRect().width === enlarged.width;
+      const redrawTime = await new Promise(resolve => {
+        const observer = new MutationObserver(() => {
+          if (canvas() && canvas() !== originalCanvas) finish(performance.now() - lastInput);
+        });
+        const timeout = setTimeout(() => finish(null), 2000);
+        function finish(value) {
+          clearTimeout(timeout);
+          observer.disconnect();
+          resolve(value);
+        }
+        observer.observe(pdfPage, { childList: true, subtree: true });
+        if (canvas() && canvas() !== originalCanvas) finish(0);
+      });
+      const percent = () => parseInt(document.querySelector("#zoom-percentage").textContent, 10);
+      for (let step = 0; step < 80; step++) wheel(-150);
+      const max = percent();
+      wheel(150);
+      const belowMax = percent();
+      for (let step = 0; step < 80; step++) wheel(150);
+      const min = percent();
+      wheel(-150);
+      return {
+        wasCentered, overflowed, immediate, unchanged, redrawTime, max, belowMax, min, aboveMin: percent(),
+        anchorError: Math.abs(anchor(enlarged) - anchor(initial)) * enlarged.width,
+      };
+    })()`);
+    assert.ok(result.wasCentered && result.overflowed, "the first zoom step introduces horizontal overflow");
+    assert.ok(result.anchorError <= 2, `cursor remains anchored within two pixels, got ${result.anchorError}`);
+    assert.ok(result.immediate && result.unchanged, "size updates immediately and a small delta rounds away");
+    assert.ok(result.redrawTime >= 190, `redraw waits approximately 200 ms from the last input, got ${result.redrawTime}`);
+    assert.equal(result.max, 2500);
+    assert.ok(result.belowMax < result.max, "zooming out immediately leaves the upper limit");
+    assert.equal(result.min, 10);
+    assert.ok(result.aboveMin > result.min, "zooming in immediately leaves the lower limit");
+    await chrome.send("Target.closeTarget", { targetId });
+  });
+
   await t.test("replacing a PDF aborts its outstanding download", async () => {
     const { targetId, page } = await newPage(chrome, url);
     await openUrl(page, `${server.origin}/slow-download.pdf`);
