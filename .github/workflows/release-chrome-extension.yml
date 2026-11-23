@@ -129,9 +129,13 @@ jobs:
           ARCHIVE: ${{ steps.package.outputs.archive }}
         shell: bash
         run: |
-          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
-            --raw-field "ref=refs/tags/$TAG" \
-            --raw-field "sha=$GITHUB_SHA" \
-            --silent
+          # Push the built commit even if main has advanced since checkout.
+          git -c credential.helper= -c 'credential.https://github.com.helper=!gh auth git-credential' \
+            push --porcelain --no-follow-tags origin "$GITHUB_SHA:refs/tags/$TAG" |
+            awk -F '\t' '
+              { print }
+              $1 == "*" { created = 1 }
+              END { if (!created) exit 1 }
+            '
           gh release create "$TAG" "$ARCHIVE" --repo "$GITHUB_REPOSITORY" \
             --verify-tag --title "$TAG" --generate-notes
