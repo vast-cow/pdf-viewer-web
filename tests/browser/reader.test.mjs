@@ -965,6 +965,12 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
     await waitFor(async () => await filename() === "sample.pdf", "replacement HTTP PDF");
     await ready(page, text);
 
+    await page.evaluate(`new Promise(resolve => {
+      addEventListener("hashchange", () => resolve(), { once: true });
+      location.hash = "#?file=";
+    })`);
+    assert.equal(await filename(), "sample.pdf");
+
     await setFragment(fragment(join(directory, "missing.pdf")));
     await ready(page, "#file-error:not([hidden])");
     assert.match(await page.evaluate('document.querySelector("#error-message").textContent'), /Check the file path/);

@@ -19,7 +19,7 @@ URL loading follows the browser’s access rules, including CORS and mixed-conte
 
 ### Open a PDF from the extension URL
 
-Open `chrome-extension://<extensionID>/extension.html#?file=/home/user/a.pdf` to load a PDF at startup. Change the `#?file=...` fragment to switch PDFs in the same tab. The `file` value accepts absolute paths such as `/home/user/a.pdf` and `C:\Users\user\a.pdf`, hostless `file:///` URLs, and HTTP(S) URLs without embedded credentials.
+Open `chrome-extension://<extensionID>/extension.html#?file=/home/user/a.pdf` to load a PDF at startup. Change the `#?file=...` fragment to switch PDFs in the same tab. The `file` value accepts absolute paths such as `/home/user/a.pdf` and `C:\Users\user\a.pdf`, local file URLs such as `file:///home/user/a.pdf`, and HTTP(S) URLs without embedded credentials.
 
 For a local path or `file:///` URL, enable **Allow access to file URLs** on the extension’s details page in `chrome://extensions`. See [Chrome’s extension permissions guide](https://developer.chrome.com/docs/extensions/develop/concepts/declare-permissions#allow-access).
 

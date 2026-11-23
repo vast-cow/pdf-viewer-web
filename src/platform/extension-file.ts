@@ -8,13 +8,14 @@ export function parseFileFragment(hash: string): URL | null | undefined {
     return new URL(`file:///${value.slice(0, 2)}/${path}`);
   }
   if (value.startsWith("/") && !value.startsWith("//")) {
-    const path = value.split("/").map(encodeURIComponent).join("/");
+    const path = value.split(/\/+/).map(encodeURIComponent).join("/");
     return new URL(`file://${path}`);
   }
 
+  if (/[\\\t\r\n]/.test(value)) return null;
   const url = URL.parse(value);
-  if (/^file:\/\/\/(?![/\\])/i.test(value) && url?.protocol === "file:"
+  if (/^file:(?:\/|\/\/(?:localhost)?\/|[a-z]:\/)(?!\/)/i.test(value) && url?.protocol === "file:"
       && !url.hostname && !url.pathname.startsWith("//")) return url;
-  if (/^https?:\/\/[^/\\]/i.test(value) && url?.hostname && !url.username && !url.password) return url;
+  if (/^https?:\/\/[^/\s?#]/i.test(value) && url?.hostname && !url.username && !url.password) return url;
   return null;
 }

@@ -12,13 +12,18 @@ test("encodes each segment of absolute local paths and preserves Windows drive l
   assert.equal(parse("C:\\Users\\user\\資料 & #1+%.pdf")?.href, `file:///C:/Users/user/${filename}`);
   assert.equal(parse("d:/PDFs/report.pdf")?.href, "file:///d:/PDFs/report.pdf");
   assert.equal(parse("/home/user/trailing-space.pdf ")?.href, "file:///home/user/trailing-space.pdf%20");
+  assert.equal(parse("/folder/..//home/user/a.pdf")?.href, "file:///home/user/a.pdf");
 });
 
-test("preserves encoded file URLs and HTTP(S) queries", () => {
+test("canonicalizes local file URLs and preserves HTTP(S) queries", () => {
   const file = "file:///home/user/a%20%26%20b.pdf";
+  for (const prefix of ["file:///", "file:/", "file://localhost/"]) {
+    assert.equal(parse(`${prefix}home/user/a%20%26%20b.pdf`)?.href, file);
+  }
+  assert.equal(parse("file:C:/Users/user/a.pdf")?.href, "file:///C:/Users/user/a.pdf");
   const https = "https://example.com/report?name=a%26b&version=2#page=3";
   const http = "http://example.com:8080/report?name=a+b&version=2";
-  for (const url of [file, https, http]) assert.equal(parse(url)?.href, url);
+  for (const url of [https, http]) assert.equal(parse(url)?.href, url);
   assert.equal(parseFileFragment("#?view=fit&file=/home/user/a.pdf")?.href, "file:///home/user/a.pdf");
 });
 
@@ -31,8 +36,9 @@ test("ignores fragments without a nonempty file parameter", () => {
 test("rejects invalid PDF specifications", () => {
   for (const value of [
     " ", "./a.pdf", "a.pdf", "C:a.pdf", "\\a.pdf", "//host/a.pdf", "\\\\host\\share\\a.pdf",
-    "file:relative.pdf", "file://host/a.pdf", "file:////host/a.pdf", "https:example.com/a.pdf",
-    "https:///example.com/a.pdf", "https://", "http://user@example.com/a.pdf",
+    "file:relative.pdf", "file://", "file://host/a.pdf", "file:////host/a.pdf", "file:///folder/..//host/a.pdf",
+    "https:example.com/a.pdf", "https:///example.com/a.pdf", "https://\t/example.com/a.pdf", "https://",
+    "https://example.com\\a.pdf", "http://user@example.com/a.pdf",
     "https://user:password@example.com/a.pdf", "ftp://example.com/a.pdf", "javascript:alert(1)",
   ]) {
     assert.equal(parse(value), null, value);
