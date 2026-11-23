@@ -1090,6 +1090,30 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
     assert.match(await page.evaluate('document.querySelector("#notice-message").textContent'), /Couldn’t put the file path in the URL/);
     assert.equal(await page.evaluate("location.hash"), manualHash);
     await waitForClearedReferences();
+
+    await background.evaluate(`(() => {
+      globalThis.pickerRequests = 0;
+      globalThis.pickerAttachments = 0;
+      chrome.runtime.onMessage.addListener(message => {
+        if (message.type === "picked-file-path") pickerRequests++;
+      });
+      const attach = chrome.debugger.attach;
+      chrome.debugger.attach = function (...args) {
+        pickerAttachments++;
+        return attach.apply(this, args);
+      };
+    })()`);
+    await pauseNextFilePath();
+    await chooseFile(page, path);
+    await waitForPausedPath();
+    await chooseFile(page, localPath);
+    await waitFor(() => background.evaluate("pickerRequests === 2"), "second file lookup queued before reload");
+    await page.command("Page.reload");
+    await ready(page, "#welcome:not([hidden])");
+    await chooseFile(page, localPath);
+    await resumePath();
+    await waitForUrl(`${extensionUrl}#?${localParams}`);
+    assert.equal(await background.evaluate("pickerAttachments"), 2, "only live viewer documents start a debugger session");
     await chrome.send("Target.closeTarget", { targetId });
   });
 

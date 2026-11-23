@@ -36,17 +36,19 @@ export async function getPickedFilePath(file: File): Promise<string> {
 
 export function registerPickedFilePathHandler() {
   const viewerUrl = chrome.runtime.getURL("extension.html");
+  const { protocol, host, pathname } = new URL(viewerUrl);
   const pendingByTab = new Map<number, Promise<FilePathResponse>>();
 
   chrome.runtime.onMessage.addListener((message, sender, respond) => {
     if (message?.type !== "picked-file-path") return;
     const { tabId, requestId } = message;
-    if (typeof requestId !== "string" || sender.tab?.id !== tabId || sender.frameId !== 0
+    const { documentId } = sender;
+    if (typeof requestId !== "string" || !documentId || sender.tab?.id !== tabId || sender.frameId !== 0
         || sender.url?.split(/[?#]/, 1)[0] !== viewerUrl) return;
 
     // Keep the debugger session in the worker so it can finish even if the viewer reloads.
     const previous = pendingByTab.get(tabId) ?? Promise.resolve();
-    const pending = previous.then(() => readPath(tabId, requestId)).catch((error: unknown) => ({
+    const pending = previous.then(() => readPath(tabId, documentId, requestId)).catch((error: unknown) => ({
       error: error instanceof Error ? `${lookupMessage} ${error.message}` : lookupMessage,
     }));
     pendingByTab.set(tabId, pending);
@@ -57,13 +59,17 @@ export function registerPickedFilePathHandler() {
     return true;
   });
 
-  async function readPath(tabId: number, requestId: string): Promise<FilePathResponse> {
+  async function readPath(tabId: number, documentId: string, requestId: string): Promise<FilePathResponse> {
     if (!await chrome.extension.isAllowedFileSchemeAccess()) return { error: permissionMessage };
+    // Queued requests may outlive their document when the tab reloads or navigates away.
+    const contexts = await chrome.runtime.getContexts({ tabIds: [tabId], frameIds: [0], documentIds: [documentId] });
+    if (!contexts.length) return { error: lookupMessage };
     const target = { tabId };
     await chrome.debugger.attach(target, "1.3");
     try {
       const { result } = await chrome.debugger.sendCommand(target, "Runtime.evaluate", {
-        expression: `location.href.split(/[?#]/, 1)[0] === ${JSON.stringify(viewerUrl)}
+        expression: `location.protocol === ${JSON.stringify(protocol)} && location.host === ${JSON.stringify(host)}
+          && location.pathname === ${JSON.stringify(pathname)}
           ? globalThis[${JSON.stringify(fileReference(requestId))}] : undefined`,
       });
       if (!result?.objectId) return { error: "Chrome couldn’t find the selected file in this viewer tab." };

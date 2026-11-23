@@ -16,11 +16,12 @@ interface ChromeExtension {
   };
   readonly extension: { isAllowedFileSchemeAccess(): Promise<boolean> };
   readonly runtime: {
+    getContexts(filter: { documentIds: string[]; tabIds: number[]; frameIds: number[] }): Promise<unknown[]>;
     getURL(path: string): string;
     sendMessage(message: FilePathRequest): Promise<FilePathResponse | undefined>;
     readonly onMessage: {
       addListener(listener: (
-        message: FilePathRequest, sender: { tab?: { id?: number }; url?: string; frameId?: number },
+        message: FilePathRequest, sender: { tab?: { id?: number }; url?: string; frameId?: number; documentId?: string },
         respond: (response: FilePathResponse) => void,
       ) => true | undefined): void;
     };
