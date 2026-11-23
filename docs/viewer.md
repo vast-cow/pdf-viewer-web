@@ -1,0 +1,41 @@
+# Viewer and deployment
+
+## How the targets share code
+
+The web and extension entry points both mount the viewer in `src/viewer/`. Web preferences use per-origin local storage. Extension preferences use Chrome’s local extension storage. Chrome’s background service worker opens the viewer in a new tab when the toolbar action fires. The extension requests the `storage` permission and declares no host permissions.
+
+Both builds include the PDF.js parser and rendering workers, annotation images, character maps, standard fonts, color profiles, and image decoders. The extension allows local WebAssembly for the decoders. PDF document scripting is disabled. A static host must serve JavaScript modules with a JavaScript MIME type and should serve WebAssembly as `application/wasm`. Both builds use relative asset paths. The web build also works when hosted under a subdirectory.
+
+## Reading PDFs
+
+- Open a file with the picker, drag it onto the viewer, or enter an absolute HTTP(S) URL.
+- Use the page field or arrow buttons to jump between pages. Choose **Fit width**, **Fit page**, or adjust the zoom with the plus and minus buttons.
+- Use **Find** or Ctrl/Command+F to search. Enter moves to the next match and Shift+Enter moves to the previous one. Text selection, links, and supported annotations stay available in either PDF color mode.
+- **Download** retrieves the original PDF bytes. The viewer also supports password entry and retries for encrypted PDFs supported by PDF.js.
+- **Theme** controls the interface. **Invert PDF** controls the pixel colors on rendered pages. Both preferences persist.
+
+URL loading follows the browser’s access rules, including CORS and mixed-content restrictions. Cross-origin URLs generally need a suitable `Access-Control-Allow-Origin` header. For incremental loading, the server must also support and expose the relevant byte-range headers. Scans without a text layer need OCR before their text can be selected or searched. XFA forms and PDF scripts are outside the viewer’s supported features.
+
+## How PDF lightness inversion works
+
+For normalized RGB, let `low` and `high` be the minimum and maximum channels. HSL lightness is `(low + high) / 2`. If lightness is reflected around 0.5, the term `1 - |2L - 1|` stays the same, so a fixed saturation produces the same chroma. Hue depends on channel differences, which also stay the same when the same offset is added to each channel. This gives the exact HSL result with one RGB offset:
+
+```text
+RGB′ = RGB + (1 − high − low)
+A′   = A
+```
+
+The Canvas implementation uses `255 - high - low` for 8-bit channels. Applying it twice restores the original bytes. The WebGL2 fragment shader uses the normalized form. Browser canvas compositing can introduce minor rounding for partially transparent pixels.
+
+## Rendering and memory
+
+PDF.js schedules visible pages first, limits the page bitmap dimensions, and cancels obsolete renders as the zoom or document changes. High-DPI rendering uses the device pixel ratio within the bitmap budget. At high zoom the viewer also renders a detail canvas for the visible area. Local files are read in slices when needed, and URL loading can use HTTP range requests.
+
+Inversion uses one reusable WebGL2 context and one pass per canvas. If WebGL2 is unavailable or a canvas exceeds GPU limits, it uses a Canvas 2D pixel pass. Only visible pages get an extra bitmap. Toggling inversion reuses rendered PDF pixels, and removing a document releases its canvases, worker resources, and fetch requests. Search can read text across the PDF, including unrendered pages. PDF.js may switch to page-at-a-time scrolling for exceptionally long documents.
+
+## Verification
+
+- `npm test` checks color edge cases, alpha, the HSL reference result, and numerical round trips.
+- `npm run check` checks the TypeScript source.
+- `npm run build` builds the production web and unpacked extension targets.
+- `npm run test:browser` exercises both builds with an installed Chrome that supports the DevTools Protocol extension commands. Use `CHROME_BIN` if the executable is named differently. Browser tests start a local static server and use a disposable Chrome profile.
