@@ -2,6 +2,7 @@ interface ChromeExtension {
   readonly action: {
     readonly onClicked: { addListener(listener: () => void): void };
   };
+  readonly extension: { isAllowedFileSchemeAccess(): Promise<boolean> };
   readonly runtime: { getURL(path: string): string };
   readonly tabs: { create(properties: { url: string }): Promise<unknown> };
   readonly storage: {

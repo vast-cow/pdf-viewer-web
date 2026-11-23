@@ -24,7 +24,12 @@ function input(id: string): HTMLInputElement {
 
 type MatchCount = { current: number; total: number };
 
-export function startViewer(store: PreferenceStore) {
+interface FragmentSource {
+  parse(hash: string): URL | null | undefined;
+  isAllowedFileSchemeAccess(): Promise<boolean>;
+}
+
+export function startViewer(store: PreferenceStore, fragment?: FragmentSource) {
   element("app").innerHTML = layout;
 
   const toolbar = element("document-toolbar");
@@ -63,6 +68,7 @@ export function startViewer(store: PreferenceStore) {
 
   const reader = new PdfReader(scrollRegion, element<HTMLDivElement>("pages"), {
     state: updateState,
+    isAllowedFileSchemeAccess: fragment?.isAllowedFileSchemeAccess,
     password(submit, incorrect) {
       submitPassword = submit;
       passwordInput.value = "";
@@ -384,6 +390,19 @@ export function startViewer(store: PreferenceStore) {
   window.addEventListener("pagehide", event => {
     if (!event.persisted) reader.close();
   });
+
+  if (fragment) {
+    const openFragment = () => {
+      const url = fragment.parse(window.location.hash);
+      if (url === null) {
+        reader.showError("Enter an absolute local path, a file URL, or an HTTP or HTTPS URL without embedded credentials.");
+      } else if (url) {
+        void reader.open(url);
+      }
+    };
+    window.addEventListener("hashchange", openFragment);
+    openFragment();
+  }
 }
 
 function bindDrop(open: (file: File) => void) {

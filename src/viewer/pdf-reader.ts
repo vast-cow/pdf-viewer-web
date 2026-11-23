@@ -31,6 +31,7 @@ export type ReaderState =
 
 interface ReaderCallbacks {
   state(state: ReaderState): void;
+  isAllowedFileSchemeAccess?(): Promise<boolean>;
   password(submit: (password: string) => void, incorrect: boolean): void;
   dismissPassword(): void;
   notice(message: string): void;
@@ -62,12 +63,14 @@ class LocalFileRanges extends PDFDataRangeTransport {
   }
 }
 
-function describeError(error: unknown, remote: boolean): string {
+function describeError(error: unknown, source: Source): string {
   if (error instanceof InvalidPDFException) return "This PDF is invalid or damaged.";
-  if (error instanceof ResponseException && error.status === 404) return "No PDF was found at this URL.";
-  return remote
-    ? "Couldn’t load this PDF. Check the URL and whether the server allows cross-origin PDF requests."
-    : "Couldn’t read this PDF. Check that the file is accessible and try opening it again.";
+  if (source instanceof URL) {
+    if (source.protocol === "file:") return "Couldn’t open this local PDF. Check the file path and try again.";
+    if (error instanceof ResponseException && error.status === 404) return "No PDF was found at this URL.";
+    return "Couldn’t load this PDF. Check the URL and whether the server allows cross-origin PDF requests.";
+  }
+  return "Couldn’t read this PDF. Check that the file is accessible and try opening it again.";
 }
 
 function download(blob: Blob, name: string) {
@@ -150,6 +153,14 @@ export class PdfReader {
     try {
       await this.disposing;
       if (this.active !== session) return;
+      if (source instanceof URL && source.protocol === "file:") {
+        const allowed = await this.callbacks.isAllowedFileSchemeAccess?.();
+        if (this.active !== session) return;
+        if (!allowed) {
+          this.showError('Enable “Allow access to file URLs” in the extension’s Chrome settings and try again.');
+          return;
+        }
+      }
       const input = source instanceof File
         ? await this.localInput(source, session)
         : { url: source.href, docBaseUrl: source.href };
@@ -180,13 +191,18 @@ export class PdfReader {
       this.view.setDocument(pdf);
       await this.view.pagesPromise;
     } catch (error) {
-      if (this.active === session) this.fail(describeError(error, source instanceof URL));
+      if (this.active === session) this.showError(describeError(error, source));
     }
   }
 
   close() {
     this.detach();
     this.callbacks.state({ kind: "idle" });
+  }
+
+  showError(message: string) {
+    this.detach();
+    this.callbacks.state({ kind: "error", message });
   }
 
   async goToPage(pageNumber: number) {
@@ -256,14 +272,9 @@ export class PdfReader {
     if (file.size <= rangeSize) return { data: initial };
     return {
       range: new LocalFileRanges(file, initial, () => {
-        if (this.active === session) this.fail("Couldn’t read the PDF file. Try opening it again.");
+        if (this.active === session) this.showError("Couldn’t read the PDF file. Try opening it again.");
       }),
     };
-  }
-
-  private fail(message: string) {
-    this.detach();
-    this.callbacks.state({ kind: "error", message });
   }
 
   private detach() {

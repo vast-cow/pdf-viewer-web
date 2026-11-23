@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { extname, join, resolve } from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
 import { launchChrome, waitFor } from "./chrome.mjs";
 import { samplePdf } from "./pdf-fixture.mjs";
 
@@ -859,9 +860,10 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
     await chrome.send("Target.closeTarget", { targetId });
   });
 
+  const { id } = await chrome.send("Extensions.loadUnpacked", { path: extension });
+  const extensionUrl = `chrome-extension://${id}/extension.html`;
+
   await t.test("unpacked MV3 toolbar action, local PDF, URL and persisted preferences", async () => {
-    const { id } = await chrome.send("Extensions.loadUnpacked", { path: extension });
-    const extensionUrl = `chrome-extension://${id}/extension.html`;
     const workerUrl = `chrome-extension://${id}/background.js`;
     const { tab, worker, viewer } = await waitFor(async () => {
       const { targetInfos } = await chrome.send("Target.getTargets", { filter: [{ type: "tab" }, { type: "service_worker" }, { type: "page" }] });
@@ -914,6 +916,62 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
     await ready(page, text);
     await page.command("Page.reload");
     await waitFor(() => page.evaluate('document.querySelector("#theme")?.value === "dark" && document.querySelector("#invert")?.getAttribute("aria-pressed") === "true"'), "saved extension preferences");
+  });
+
+  await t.test("extension URL opens local PDFs at startup and switches PDFs in the same tab", async () => {
+    const name = "資料 & #1+%.pdf";
+    const localPath = join(directory, name);
+    await writeFile(localPath, samplePdf(2));
+    const fragment = value => `#?file=${encodeURIComponent(value)}`;
+    const initialUrl = extensionUrl + fragment(localPath);
+
+    const settings = await chrome.send("Target.createTarget", { url: `chrome://extensions/?id=${id}` });
+    const settingsPage = await chrome.attach(settings.targetId);
+    await waitFor(() => settingsPage.evaluate("!!globalThis.chrome?.developerPrivate?.updateExtensionConfiguration"), "extension settings");
+    // Chrome reloads the unpacked extension after a file access change.
+    await settingsPage.evaluate("chrome.developerPrivate.updateProfileConfiguration({ inDeveloperMode: true })");
+    const setFileAccess = async fileAccess => {
+      await settingsPage.evaluate(
+        `chrome.developerPrivate.updateExtensionConfiguration(${JSON.stringify({ extensionId: id, fileAccess })})`,
+      );
+      await waitFor(() => settingsPage.evaluate(`chrome.developerPrivate.getExtensionInfo(${JSON.stringify(id)})
+        .then(info => info.state === "ENABLED" && info.fileAccess.isActive === ${fileAccess})`), "extension reload after permission change");
+    };
+
+    await setFileAccess(false);
+    const denied = await newPage(chrome, initialUrl);
+    assert.equal(await denied.page.evaluate("chrome.extension.isAllowedFileSchemeAccess()"), false);
+    await ready(denied.page, "#file-error:not([hidden])");
+    assert.match(await denied.page.evaluate('document.querySelector("#error-message").textContent'), /Allow access to file URLs/);
+    await chrome.send("Target.closeTarget", { targetId: denied.targetId });
+
+    await setFileAccess(true);
+    await chrome.send("Target.closeTarget", { targetId: settings.targetId });
+
+    const { targetId, page } = await newPage(chrome, initialUrl);
+    await ready(page, text);
+    assert.equal(await page.evaluate("chrome.extension.isAllowedFileSchemeAccess()"), true);
+    const filename = () => page.evaluate('document.querySelector("#filename").textContent');
+    assert.equal(await filename(), name);
+    await page.evaluate("globalThis.sameViewer = true");
+
+    const setFragment = hash => page.evaluate(`location.hash = ${JSON.stringify(hash)}`);
+    await setFragment(fragment(pathToFileURL(largePath).href));
+    await waitFor(async () => await filename() === "large.pdf", "replacement local PDF");
+    await ready(page, text);
+    assert.equal(await page.evaluate("globalThis.sameViewer"), true);
+
+    await setFragment(fragment(`${server.origin}/sample.pdf?name=a%26b&version=2`));
+    await waitFor(async () => await filename() === "sample.pdf", "replacement HTTP PDF");
+    await ready(page, text);
+
+    await setFragment(fragment(join(directory, "missing.pdf")));
+    await ready(page, "#file-error:not([hidden])");
+    assert.match(await page.evaluate('document.querySelector("#error-message").textContent'), /Check the file path/);
+
+    await setFragment(fragment("./relative.pdf"));
+    await waitFor(() => page.evaluate('document.querySelector("#error-message").textContent.includes("absolute local path")'), "invalid fragment guidance");
+    await chrome.send("Target.closeTarget", { targetId });
   });
 
   assert.deepEqual(chrome.issues.filter(issue => !issue.includes("CORS policy")), []);

@@ -2,7 +2,7 @@
 
 ## How the targets share code
 
-The web and extension entry points both mount the viewer in `src/viewer/`. Web preferences use per-origin local storage. Extension preferences use Chrome’s local extension storage. Chrome’s background service worker opens the viewer in a new tab when the toolbar action fires. The extension requests the `storage` permission and declares no host permissions.
+The web and extension entry points both mount the viewer in `src/viewer/`. Web preferences use per-origin local storage. Extension preferences use Chrome’s local extension storage. Chrome’s background service worker opens the viewer in a new tab when the toolbar action fires. The extension requests `storage` and declares the `file:///*` host permission for opening local PDF URLs.
 
 Both builds include the PDF.js parser and rendering workers, annotation images, character maps, standard fonts, color profiles, and image decoders. The extension allows local WebAssembly for the decoders. PDF document scripting is disabled. A static host must serve JavaScript modules with a JavaScript MIME type and should serve WebAssembly as `application/wasm`. Both builds use relative asset paths. The web build also works when hosted under a subdirectory.
 
@@ -16,6 +16,20 @@ Both builds include the PDF.js parser and rendering workers, annotation images, 
 - **Theme** in **More actions** controls the interface. **Invert PDF** in the toolbar controls the pixel colors on rendered pages. Both preferences persist independently.
 
 URL loading follows the browser’s access rules, including CORS and mixed-content restrictions. Cross-origin URLs generally need a suitable `Access-Control-Allow-Origin` header. For incremental loading, the server must also support and expose the relevant byte-range headers. Scans without a text layer need OCR before their text can be selected or searched. XFA forms and PDF scripts are outside the viewer’s supported features.
+
+### Open a PDF from the extension URL
+
+Open `chrome-extension://<extensionID>/extension.html#?file=/home/user/a.pdf` to load a PDF at startup. Change the `#?file=...` fragment to switch PDFs in the same tab. The `file` value accepts absolute paths such as `/home/user/a.pdf` and `C:\Users\user\a.pdf`, hostless `file:///` URLs, and HTTP(S) URLs without embedded credentials.
+
+For a local path or `file:///` URL, enable **Allow access to file URLs** on the extension’s details page in `chrome://extensions`. See [Chrome’s extension permissions guide](https://developer.chrome.com/docs/extensions/develop/concepts/declare-permissions#allow-access).
+
+If the `file` value contains spaces, `&`, or other URL delimiters, encode the entire value with `encodeURIComponent` before adding it to the fragment:
+
+```js
+const viewer = "chrome-extension://<extensionID>/extension.html";
+const file = "/home/user/Notes & plans.pdf";
+const viewerUrl = `${viewer}#?file=${encodeURIComponent(file)}`;
+```
 
 ## How PDF lightness inversion works
 
@@ -38,7 +52,7 @@ Inversion uses one reusable WebGL2 context and one pass per canvas. If WebGL2 is
 
 ## Verification
 
-- `npm test` checks color edge cases, alpha, the HSL reference result, and numerical round trips.
+- `npm test` checks color edge cases, alpha, the HSL reference result, numerical round trips, and extension fragment parsing.
 - `npm run check` checks the TypeScript source.
 - `npm run build` builds the production web and unpacked extension targets.
 - `npm run test:browser` exercises both builds with an installed Chrome that supports the DevTools Protocol extension commands. Use `CHROME_BIN` if the executable is named differently. Browser tests start a local static server and use a disposable Chrome profile.
