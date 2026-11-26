@@ -12,6 +12,15 @@ const web = resolve("dist/web");
 const extension = resolve("dist/extension");
 const small = samplePdf();
 const large = samplePdf(240, 400_000);
+// Observe the actual OffscreenCanvas before PDF.js transfers it to the viewer.
+const observeRenderer = `{
+  const transfer = OffscreenCanvas.prototype.transferToImageBitmap;
+  OffscreenCanvas.prototype.transferToImageBitmap = function () {
+    const { alpha } = this.getContext("2d").getContextAttributes();
+    postMessage({ raster: { alpha, width: this.width, height: this.height } });
+    return transfer.call(this);
+  };
+}\n`;
 const mime = {
   ".css": "text/css", ".html": "text/html", ".js": "text/javascript", ".mjs": "text/javascript",
   ".png": "image/png", ".svg": "image/svg+xml", ".wasm": "application/wasm",
@@ -20,7 +29,7 @@ const mime = {
 async function serve() {
   let blockedRanges = 0;
   const server = createServer(async (req, res) => {
-    const { pathname } = new URL(req.url, "http://localhost");
+    const { pathname, searchParams } = new URL(req.url, "http://localhost");
     if (["/sample.pdf", "/large.pdf", "/slow-download.pdf", "/without-cors.pdf"].includes(pathname)) {
       const bytes = ["/large.pdf", "/slow-download.pdf"].includes(pathname) ? large : small;
       if (pathname !== "/without-cors.pdf") {
@@ -57,7 +66,11 @@ async function serve() {
       const file = resolve(web, path);
       if (!file.startsWith(web + "/")) throw new Error("Invalid test resource path");
       const body = await readFile(file);
-      res.writeHead(200, { "Content-Type": mime[extname(path)] ?? "application/octet-stream" }).end(body);
+      res.writeHead(200, { "Content-Type": mime[extname(path)] ?? "application/octet-stream" });
+      if (path.startsWith("assets/pdf.renderer.min-") && searchParams.has("observe-raster")) {
+        res.write(observeRenderer);
+      }
+      res.end(body);
     } catch {
       res.writeHead(404).end();
     }
@@ -190,6 +203,36 @@ function sample(page, selector, left, top) {
   })()`);
 }
 
+async function assertGrayscaleText(page, selector) {
+  const counts = await page.evaluate(`(() => {
+    const canvas = document.querySelector(${JSON.stringify(selector)});
+    const context = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
+    // Crop to the black text, below the fixture's colored rectangle.
+    const [x, y, width, height] = [0.05 * canvas.width, 0.18 * canvas.height, 0.85 * canvas.width, 0.08 * canvas.height].map(Math.floor);
+    context.canvas.width = width;
+    context.canvas.height = height;
+    context.drawImage(canvas, x, y, width, height, 0, 0, width, height);
+    const { data } = context.getImageData(0, 0, width, height);
+    let colored = 0, translucent = 0, intermediate = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i] !== data[i + 1] || data[i] !== data[i + 2]) colored++;
+      if (data[i + 3] !== 255) translucent++;
+      if (data[i] > 0 && data[i] < 255) intermediate++;
+    }
+    return { colored, translucent, intermediate };
+  })()`);
+  assert.equal(counts.colored, 0, "monochrome text has no chromatic fringes");
+  assert.equal(counts.translucent, 0, "text and page background are opaque");
+  assert.ok(counts.intermediate > 0, "text retains grayscale antialiasing");
+}
+
+function canvasSize(page, selector) {
+  return page.evaluate(`(() => {
+    const { width, height } = document.querySelector(${JSON.stringify(selector)});
+    return { width, height };
+  })()`);
+}
+
 async function newPage(chrome, url, shader = true) {
   const { targetId } = await chrome.send("Target.createTarget", { url });
   const page = await chrome.attach(targetId);
@@ -239,6 +282,109 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
     writeFile(localPath, samplePdf(2)),
   ]);
   const url = `${server.origin}/reader/`;
+
+  const rasterPath = join(directory, "raster.pdf");
+  await writeFile(rasterPath, samplePdf(1));
+  for (const worker of [true, false]) {
+    await t.test(`alpha-enabled PDF rasterization on the ${worker ? "renderer worker" : "main thread"}`, async () => {
+      const { targetId, page } = await newPage(chrome, url);
+      await page.command("Emulation.setDeviceMetricsOverride", { width: 1100, height: 760, deviceScaleFactor: 1, mobile: false });
+      await page.evaluate(`(() => {
+        globalThis.rasters = [];
+        globalThis.renderRequests = [];
+        ${worker ? `
+          globalThis.Worker = class extends Worker {
+            constructor(url, options) {
+              const renderer = String(url).includes("pdf.renderer.min-");
+              super(renderer ? String(url) + "?observe-raster" : url, options);
+              if (renderer) this.addEventListener("message", ({ data }) => {
+                if (data.raster) rasters.push(data.raster);
+              });
+            }
+            postMessage(message, ...args) {
+              if (message.action === "InitializeGraphics" || message.data?.operationsFilterMask) {
+                renderRequests.push(message.action);
+              }
+              return super.postMessage(message, ...args);
+            }
+          };
+        ` : `
+          globalThis.OffscreenCanvas = undefined;
+          const fillText = CanvasRenderingContext2D.prototype.fillText;
+          CanvasRenderingContext2D.prototype.fillText = function (...args) {
+            const { width, height } = this.canvas;
+            rasters.push({ alpha: this.getContextAttributes().alpha, width, height });
+            return fillText.apply(this, args);
+          };
+        `}
+      })()`);
+      await chooseFile(page, rasterPath);
+      await ready(page, text);
+      assert.equal(await exists(page, '#invert[aria-pressed="false"]'), true);
+
+      async function assertRaster(selector) {
+        const { width, height } = await canvasSize(page, selector);
+        const rasters = await waitFor(async () => {
+          const matches = await page.evaluate(`rasters.filter(raster => raster.width === ${width} && raster.height === ${height})`);
+          return matches.length && matches;
+        }, `PDF raster context for ${selector}`);
+        assert.ok(rasters.every(({ alpha }) => alpha === true), JSON.stringify(rasters));
+      }
+
+      await assertRaster(sourceCanvas);
+      assert.deepEqual(await sample(page, sourceCanvas, 0.1, 0.08), [51, 102, 153, 255]);
+      assert.deepEqual(await sample(page, sourceCanvas, 0.9, 0.85), [255, 255, 255, 255]);
+      await assertGrayscaleText(page, sourceCanvas);
+
+      await page.evaluate(`globalThis.originalCanvas = document.querySelector(${JSON.stringify(sourceCanvas)});
+        globalThis.originalBitmap = originalCanvas.toDataURL(); true`);
+      const rasterState = () => page.evaluate("({ paints: rasters.length, requests: renderRequests.length })");
+      const before = await rasterState();
+      await click(page, "#invert");
+      await ready(page, invertedCanvas);
+      assert.deepEqual(await sample(page, invertedCanvas, 0.1, 0.08), [102, 153, 204, 255]);
+      await assertGrayscaleText(page, invertedCanvas);
+      await click(page, "#invert");
+      assert.equal(await exists(page, invertedCanvas), false);
+      await page.evaluate("new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))");
+      assert.equal(await page.evaluate(`originalCanvas === document.querySelector(${JSON.stringify(sourceCanvas)})
+        && originalBitmap === originalCanvas.toDataURL()`), true);
+      assert.deepEqual(await rasterState(), before, "inversion reuses the existing page bitmap");
+
+      const thumbnail = '.thumbnail[data-page="1"] canvas';
+      await click(page, "#toggle-sidebar");
+      await ready(page, thumbnail);
+      await assertRaster(thumbnail);
+      assert.deepEqual(await sample(page, thumbnail, 0.1, 0.08), [51, 102, 153, 255]);
+      await click(page, "#toggle-sidebar");
+
+      const detail = '.page[data-page-number="1"] canvas.detailView';
+      await page.evaluate('document.querySelector("#zoom").add(new Option("600%", "6")); true');
+      await setValue(page, "#zoom", "6", "change");
+      await page.evaluate('document.querySelector("#scroll-region").scrollTo(0, 0); true');
+      await ready(page, detail);
+      await assertRaster(detail);
+      assert.deepEqual(await sample(page, detail, 0, 0), [255, 255, 255, 255]);
+      const detailColor = await page.evaluate(`(() => {
+        const { style } = document.querySelector(${JSON.stringify(detail)});
+        return [
+          (10 - parseFloat(style.left)) / parseFloat(style.width),
+          (8 - parseFloat(style.top)) / parseFloat(style.height),
+        ];
+      })()`);
+      assert.deepEqual(await sample(page, detail, ...detailColor), [51, 102, 153, 255]);
+      if (worker) {
+        assert.ok(await page.evaluate('renderRequests.includes("ExecuteOperatorList")'), "detail render uses an operations filter");
+      }
+      await click(page, "#invert");
+      const invertedDetail = `${detail}.pdf-inverted-canvas`;
+      await ready(page, invertedDetail);
+      assert.deepEqual(await sample(page, invertedDetail, ...detailColor), [102, 153, 204, 255]);
+      await click(page, "#invert");
+
+      await chrome.send("Target.closeTarget", { targetId });
+    });
+  }
 
   await t.test("static build renders, searches and inverts with WebGL2", async () => {
     const { targetId, page } = await newPage(chrome, url);
@@ -903,6 +1049,9 @@ test("built PDF reader in Chrome", { timeout: 90_000 }, async t => {
     for (const file of ["pdf.worker.min", "pdf.renderer.min"]) {
       assert.ok(workers.some(url => url.startsWith(`chrome-extension://${id}/`) && url.includes(file)), JSON.stringify(workers));
     }
+    await assertGrayscaleText(page, sourceCanvas);
+    assert.equal(await page.evaluate(`document.querySelector(${JSON.stringify(sourceCanvas)})
+      .getContext("2d").getContextAttributes().alpha`), true);
     const beforePinch = await zoomState(page);
     await pinch(page, beforePinch, 1.25, "mouse");
     assertZoom(beforePinch, await zoomState(page), 1);

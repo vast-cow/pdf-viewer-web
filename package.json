@@ -5,6 +5,7 @@
   "type": "module",
   "engines": { "node": ">=22.13.0" },
   "scripts": {
+    "postinstall": "node scripts/patch-pdfjs-canvas.mjs",
     "dev": "vite --config vite.web.config.ts",
     "build": "npm run build:web && npm run build:extension",
     "build:web": "vite build --config vite.web.config.ts",

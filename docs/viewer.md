@@ -52,6 +52,10 @@ The Canvas implementation uses `255 - high - low` for 8-bit channels. Applying i
 
 PDF.js schedules visible pages first, limits the page bitmap dimensions, and cancels obsolete renders as the zoom or document changes. High-DPI rendering uses the device pixel ratio within the bitmap budget. At high zoom the viewer also renders a detail canvas for the visible area. Local files are read in slices when needed, and URL loading can use HTTP range requests.
 
+Both builds rasterize PDF pages, high-zoom details, and thumbnails with alpha-enabled Canvas 2D contexts, including when inversion is off. In Chromium this suppresses LCD subpixel antialiasing, whose colored text fringes would otherwise survive hue-preserving inversion. The change leaves grayscale antialiasing, subpixel positioning, font hinting, and document colors to the normal rasterizer. PDF.js still fills the page background with opaque white. The HTML standard defines `alpha: true` as a transparency capability, so grayscale-only antialiasing remains browser-dependent. [HTML Canvas 2D context settings](https://html.spec.whatwg.org/multipage/canvas.html#concept-canvas-alpha)
+
+The `npm ci` postinstall script patches `BaseCanvasFactory.getNoAlphaContext()` in the pinned PDF.js 6.5.438 legacy main module and minified renderer worker. The script checks both implementations before writing either file and fails if the version or expected code changes. Review both sites when upgrading PDF.js. Optimized partial rendering and canvas size limits continue to use PDF.js's existing paths.
+
 The sidebar renders thumbnails one at a time around its visible area. It releases preview canvases when they scroll out of range, when the sidebar closes, and when the document changes. PDF.js releases thumbnail rendering data for pages outside its main viewer cache.
 
 Inversion uses one reusable WebGL2 context and one pass per canvas. If WebGL2 is unavailable or a canvas exceeds GPU limits, it uses a Canvas 2D pixel pass. Only visible pages get an extra bitmap. Toggling inversion reuses rendered PDF pixels, and removing a document releases its canvases, worker resources, and fetch requests. Search can read text across the PDF, including unrendered pages. PDF.js may switch to page-at-a-time scrolling for exceptionally long documents.
@@ -61,4 +65,4 @@ Inversion uses one reusable WebGL2 context and one pass per canvas. If WebGL2 is
 - `npm test` checks color edge cases, alpha, the HSL reference result, numerical round trips, and extension fragment parsing.
 - `npm run check` checks the TypeScript source.
 - `npm run build` builds the production web and unpacked extension targets.
-- `npm run test:browser` exercises both builds with an installed Chrome that supports the DevTools Protocol extension commands. Use `CHROME_BIN` if the executable is named differently. Browser tests start a local static server and use a disposable Chrome profile.
+- `npm run test:browser` exercises both builds with an installed Chrome that supports the DevTools Protocol extension commands. The tests check the raster context on the main thread and inside the renderer worker, grayscale text edges, original and inverted colors, detail and thumbnail rendering, and bitmap reuse. Use `CHROME_BIN` if the executable is named differently. Browser tests start a local static server and use a disposable Chrome profile.
